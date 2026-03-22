@@ -120,17 +120,7 @@ canvas#gameCanvas{display:block;width:100vw;height:100vh;position:fixed;top:0;le
     <tr><td>↑ (air)</td><td>Frontflip</td></tr>
     <tr><td>↓ (air)</td><td>Backflip</td></tr>
     <tr><td>Space (hold → release)</td><td>Crouch → Pop</td></tr>
-    <tr><td>Q</td><td>Frontflip</td></tr>
-    <tr><td>E</td><td>Backflip</td></tr>
-    <tr><td>I</td><td>Nose Grab</td></tr>
-    <tr><td>K</td><td>Tail Grab</td></tr>
-    <tr><td>J</td><td>Mute Grab</td></tr>
-    <tr><td>L</td><td>Safety Grab</td></tr>
-    <tr><td>J+K</td><td>Truck Driver</td></tr>
-    <tr><td>I+J</td><td>Japan</td></tr>
-    <tr><td>T</td><td>Tweak Grab</td></tr>
     <tr><td>B</td><td>Butter / Press</td></tr>
-    <tr><td>Tab</td><td>Switch Stance</td></tr>
     <tr><td>F</td><td>Set Session Marker</td></tr>
     <tr><td>R</td><td>Respawn / Restart</td></tr>
     <tr><td>Escape</td><td>Pause</td></tr>
@@ -157,7 +147,7 @@ canvas#gameCanvas{display:block;width:100vw;height:100vh;position:fixed;top:0;le
   <div id="stanceDisplay">Regular</div>
   <div id="sessionInfo"></div>
   <div id="trickList"></div>
-  <div id="controlsHint">W = Forward &nbsp; S = Brake &nbsp; SPACE = Pop &nbsp; A/D = Steer/Spin &nbsp; Q/↑ = Frontflip &nbsp; E/↓ = Backflip &nbsp; I/J/K/L = Grabs</div>
+  <div id="controlsHint">W/↑ = Forward &nbsp; S/↓ = Brake &nbsp; SPACE = Pop &nbsp; A/D = Steer/Spin &nbsp; W = Frontflip (air) &nbsp; S = Backflip (air)</div>
 </div>
 
 <!-- EDITOR UI -->
@@ -285,7 +275,7 @@ let pointerLocked = false;
 window.addEventListener('keydown', e => {
   if(!keys[e.code]) keysJustPressed[e.code] = true;
   keys[e.code] = true;
-  if(e.code === 'Tab' || e.code === 'Space') e.preventDefault();
+  if(e.code === 'Tab' || e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
 });
 window.addEventListener('keyup', e => { keys[e.code] = false; });
 
@@ -567,6 +557,31 @@ function isOnIcySurface(x, z){
   return false;
 }
 
+// Returns {index, centerX, centerZ, along, railLen, dirX, dirZ} if on a rail, else null
+function getOnRailInfo(x, z){
+  if(!currentLevel) return null;
+  const rails = currentLevel.railData || [];
+  for(let i = 0; i < rails.length; i++){
+    const r = rails[i];
+    const sx=r.sx, sz=r.sz, ex=r.ex, ez=r.ez;
+    const rdx=ex-sx, rdz=ez-sz;
+    const rLen = Math.sqrt(rdx*rdx+rdz*rdz);
+    if(rLen < 0.1) continue;
+    const dirX=rdx/rLen, dirZ=rdz/rLen;
+    const toX=x-sx, toZ=z-sz;
+    const along = toX*dirX + toZ*dirZ;
+    const perp = -toX*dirZ + toZ*dirX; // signed perpendicular
+    const railW = r.w || 0.35;
+    if(along >= 0 && along <= rLen && Math.abs(perp) <= railW + 0.15){
+      const t = clamp(along / rLen, 0, 1);
+      const cx = sx + rdx * t;
+      const cz = sz + rdz * t;
+      return {index:i, centerX:cx, centerZ:cz, along, railLen:rLen, dirX, dirZ, perp};
+    }
+  }
+  return null;
+}
+
 function checkGroundRailSnap(){
   if(!currentLevel || sk.speed < 1.5) return null;
   const rails = currentLevel.railData || [];
@@ -658,9 +673,8 @@ function createJumpMesh(j){
   return mesh;
 }
 
-// --- RAIL MESH ---
-const railMat = new THREE.MeshStandardMaterial({color:0x999999, metalness:0.85, roughness:0.25});
-const railPostMat = new THREE.MeshLambertMaterial({color:0x666666});
+// --- RAIL MESH (thin slanted box) ---
+const railMat = new THREE.MeshStandardMaterial({color:0xAAAAAA, metalness:0.7, roughness:0.3});
 
 function createRailMesh(r){
   const group = new THREE.Group();
@@ -670,29 +684,61 @@ function createRailMesh(r){
   const ang = Math.atan2(dx,dz);
   const sh = getHeight(sx,sz)+rh;
   const eh = getHeight(ex,ez)+rh;
-  // Rail bar
-  const barGeo = new THREE.BoxGeometry(0.1, 0.1, len);
-  const bar = new THREE.Mesh(barGeo, railMat);
-  bar.castShadow=true;
-  // Tilt for height diff
-  bar.rotation.x = Math.atan2(eh-sh, len);
-  group.add(bar);
-  // Posts
-  const nPosts = Math.max(2, Math.floor(len/3.5));
-  for(let i=0;i<nPosts;i++){
-    const t=i/(nPosts-1);
-    const pH = lerp(rh, rh + (eh-sh)-(getHeight(lerp(sx,ex,t),lerp(sz,ez,t))-getHeight(sx,sz)), t);
-    const postH = Math.max(0.3, rh - 0.05);
-    const postGeo = new THREE.CylinderGeometry(0.04,0.06, postH, 6);
-    const post = new THREE.Mesh(postGeo, railPostMat);
-    post.position.set(0, -postH/2-0.02, (t-0.5)*len);
-    post.castShadow=true;
-    group.add(post);
+  const railW = r.w || 0.35;
+  const railH = 0.25;
+  // Rainbow rail: multicolored segments
+  if(r.rainbow){
+    const segments = 10;
+    const segLen = len / segments;
+    const rainbowColors = [0xFF0000,0xFF7700,0xFFFF00,0x00CC00,0x0077FF,0x5500FF,0xAA00FF,0xFF0077,0xFF4400,0x00FFAA];
+    for(let s = 0; s < segments; s++){
+      const segGeo = new THREE.BoxGeometry(railW, railH, segLen + 0.02);
+      const segMat = new THREE.MeshStandardMaterial({color:rainbowColors[s % rainbowColors.length], roughness:0.4, metalness:0.2});
+      const seg = new THREE.Mesh(segGeo, segMat);
+      seg.position.set(0, railH/2, (s + 0.5) * segLen - len/2);
+      seg.castShadow=true; seg.receiveShadow=true;
+      group.add(seg);
+    }
+  } else {
+    const bodyGeo = new THREE.BoxGeometry(railW, railH, len);
+    const bodyMat = new THREE.MeshLambertMaterial({color:r.color||0xFF8800});
+    const body = new THREE.Mesh(bodyGeo, bodyMat);
+    body.position.y = railH/2;
+    body.castShadow=true; body.receiveShadow=true;
+    group.add(body);
+  }
+  // Metallic top surface
+  const topGeo = new THREE.BoxGeometry(railW+0.04, 0.04, len+0.04);
+  const top = new THREE.Mesh(topGeo, railMat);
+  top.position.y = railH+0.02;
+  group.add(top);
+  // Support poles at 25% and 75%
+  const poleMat = new THREE.MeshStandardMaterial({color:0x777777, roughness:0.4, metalness:0.5});
+  const polePositions = [0.25, 0.75];
+  for(let i = 0; i < polePositions.length; i++){
+    const t = polePositions[i];
+    const poleZ = (t - 0.5) * len;
+    const railHAtT = lerp(sh, eh, t);
+    const groundHAtT = lerp(getHeight(sx,sz), getHeight(ex,ez), t);
+    const poleHeight = railHAtT - groundHAtT;
+    if(poleHeight > 0.05){
+      const poleGeo = new THREE.CylinderGeometry(0.03, 0.035, poleHeight, 6);
+      const pole = new THREE.Mesh(poleGeo, poleMat);
+      pole.position.set(0, -poleHeight/2 + 0.02, poleZ);
+      pole.castShadow = true;
+      group.add(pole);
+      const plateGeo = new THREE.CylinderGeometry(0.06, 0.07, 0.03, 6);
+      const plate = new THREE.Mesh(plateGeo, poleMat);
+      plate.position.set(0, -poleHeight + 0.035, poleZ);
+      group.add(plate);
+    }
   }
   const mx=(sx+ex)/2, mz=(sz+ez)/2;
   const mh=(sh+eh)/2;
-  group.position.set(mx, mh, mz);
+  const topLocalH = railH + 0.04;
+  group.position.set(mx, mh - topLocalH, mz);
   group.rotation.y = ang;
+  group.rotation.x = Math.atan2(sh-eh, len);
   group.userData = {type:'rail', data:r, len, startH:sh, endH:eh};
   scene.add(group);
   featureMeshes.push(group);
@@ -703,12 +749,27 @@ function createRailMesh(r){
 function createBoxMesh(b){
   const group = new THREE.Group();
   const w=b.w||2, h=b.h||0.6, l=b.len||6;
-  const bodyGeo = new THREE.BoxGeometry(w, h, l);
-  const bodyMat = new THREE.MeshLambertMaterial({color:b.color||0xFF8800});
-  const body = new THREE.Mesh(bodyGeo, bodyMat);
-  body.position.y = h/2;
-  body.castShadow=true; body.receiveShadow=true;
-  group.add(body);
+  // Rainbow box: multicolored segments
+  if(b.rainbow){
+    const segments = 8;
+    const segLen = l / segments;
+    const rainbowColors = [0xFF0000,0xFF7700,0xFFFF00,0x00CC00,0x0077FF,0x5500FF,0xAA00FF,0xFF0077];
+    for(let s = 0; s < segments; s++){
+      const segGeo = new THREE.BoxGeometry(w, h, segLen + 0.02);
+      const segMat = new THREE.MeshStandardMaterial({color:rainbowColors[s % rainbowColors.length], roughness:0.45, metalness:0.15});
+      const seg = new THREE.Mesh(segGeo, segMat);
+      seg.position.set(0, h/2, (s + 0.5) * segLen - l/2);
+      seg.castShadow=true; seg.receiveShadow=true;
+      group.add(seg);
+    }
+  } else {
+    const bodyGeo = new THREE.BoxGeometry(w, h, l);
+    const bodyMat = new THREE.MeshLambertMaterial({color:b.color||0xFF8800});
+    const body = new THREE.Mesh(bodyGeo, bodyMat);
+    body.position.y = h/2;
+    body.castShadow=true; body.receiveShadow=true;
+    group.add(body);
+  }
   // Top surface
   const topGeo = new THREE.BoxGeometry(w+0.04, 0.04, l+0.04);
   const topMat = new THREE.MeshStandardMaterial({color:0xBBBBBB, metalness:0.5, roughness:0.4});
@@ -728,6 +789,72 @@ function createBoxMesh(b){
 const treeTrunkMat = new THREE.MeshLambertMaterial({color:0x5C3A1E});
 const treeLeafMat = new THREE.MeshLambertMaterial({color:0x2D6A27});
 const treeSnowMat = new THREE.MeshLambertMaterial({color:0xEEEEFF});
+
+// --- PARK BENCH MESH ---
+function createBenchMesh(b){
+  const group = new THREE.Group();
+  const benchW = b.w || 1.8;
+  const benchD = b.d || 0.5;
+  const benchH = b.h || 0.45;
+  const rot = b.rot || 0;
+
+  const woodMat = new THREE.MeshStandardMaterial({color:0x6B4226, roughness:0.8, metalness:0.0});
+  const metalMat = new THREE.MeshStandardMaterial({color:0x555555, roughness:0.4, metalness:0.5});
+
+  // Seat planks (3 planks)
+  for(let i = 0; i < 3; i++){
+    const plankGeo = new THREE.BoxGeometry(benchW, 0.03, 0.12);
+    const plank = new THREE.Mesh(plankGeo, woodMat);
+    plank.position.set(0, benchH, -0.15 + i * 0.15);
+    plank.castShadow = true;
+    group.add(plank);
+  }
+
+  // Backrest planks (2 planks) - angled slightly back
+  for(let i = 0; i < 2; i++){
+    const plankGeo = new THREE.BoxGeometry(benchW, 0.03, 0.1);
+    const plank = new THREE.Mesh(plankGeo, woodMat);
+    plank.position.set(0, benchH + 0.12 + i * 0.12, -0.2);
+    plank.rotation.x = -0.15;
+    plank.castShadow = true;
+    group.add(plank);
+  }
+
+  // Metal legs (2 side frames)
+  for(let side = -1; side <= 1; side += 2){
+    const legX = side * (benchW * 0.42);
+    // Front leg
+    const fLegGeo = new THREE.BoxGeometry(0.04, benchH, 0.04);
+    const fLeg = new THREE.Mesh(fLegGeo, metalMat);
+    fLeg.position.set(legX, benchH/2, 0.1);
+    fLeg.castShadow = true;
+    group.add(fLeg);
+    // Back leg
+    const bLegGeo = new THREE.BoxGeometry(0.04, benchH + 0.32, 0.04);
+    const bLeg = new THREE.Mesh(bLegGeo, metalMat);
+    bLeg.position.set(legX, (benchH + 0.32)/2, -0.2);
+    bLeg.castShadow = true;
+    group.add(bLeg);
+    // Cross brace
+    const braceGeo = new THREE.BoxGeometry(0.03, 0.03, 0.35);
+    const brace = new THREE.Mesh(braceGeo, metalMat);
+    brace.position.set(legX, benchH * 0.35, -0.05);
+    group.add(brace);
+    // Armrest
+    const armGeo = new THREE.BoxGeometry(0.06, 0.03, 0.3);
+    const arm = new THREE.Mesh(armGeo, metalMat);
+    arm.position.set(legX, benchH + 0.03, -0.05);
+    group.add(arm);
+  }
+
+  const gh = getHeight(b.x, b.z);
+  group.position.set(b.x, gh, b.z);
+  group.rotation.y = rot;
+  group.userData = {type:'bench', data:b};
+  scene.add(group);
+  featureMeshes.push(group);
+  return group;
+}
 
 function createTreeMesh(t){
   const s = t.s || 1;
@@ -761,32 +888,39 @@ const BUILTIN_LEVELS = {
     desc: "Classic terrain park with jump lines and rail gardens",
     spawn: [0, 0, 8],
     jumps: [
-      {x:0, z:55, w:10, len:14, h:2, rot:0},
-      {x:0, z:130, w:12, len:18, h:3.5, rot:0},
-      {x:0, z:265, w:14, len:22, h:4.5, rot:0},
-      {x:-8, z:340, w:8, len:12, h:2.5, rot:0.15},
-      {x:8, z:340, w:8, len:12, h:2.5, rot:-0.15},
-      {x:0, z:420, w:16, len:26, h:5.5, rot:0},
+      {x:0, z:60, w:10, len:14, h:2, rot:0},
+      {x:0, z:155, w:12, len:18, h:3.5, rot:0},
+      {x:0, z:310, w:14, len:22, h:4.5, rot:0},
+      {x:-8, z:420, w:8, len:12, h:2.5, rot:0.15},
+      {x:8, z:420, w:8, len:12, h:2.5, rot:-0.15},
+      {x:0, z:530, w:16, len:26, h:5.5, rot:0},
     ],
     rails: [
-      {sx:-5, sz:160, ex:-5, ez:174, h:0.9},
-      {sx:0, sz:162, ex:0, ez:178, h:1.0},
-      {sx:5, sz:160, ex:5, ez:176, h:0.85},
-      {sx:-8, sz:165, ex:-6, ez:180, h:1.1},
-      {sx:8, sz:163, ex:6.5, ez:179, h:0.95},
-      {sx:-4, sz:298, ex:-4, ez:316, h:1.0},
-      {sx:0, sz:300, ex:0, ez:320, h:1.1},
-      {sx:4, sz:298, ex:4, ez:315, h:0.9},
-      {sx:-9, sz:302, ex:-7, ez:318, h:1.2},
-      {sx:9, sz:300, ex:7, ez:316, h:1.0},
-      {sx:-3, sz:370, ex:-3, ez:395, h:1.3},
-      {sx:3, sz:372, ex:3, ez:398, h:1.1},
+      // Rail garden 1: two rails side by side
+      {sx:-4, sz:190, ex:-4, ez:210, h:0.9},
+      {sx:-1, sz:190, ex:-1, ez:210, h:0.9},
+      // Rainbow rail
+      {sx:5, sz:192, ex:5, ez:214, h:0.85, rainbow:true},
+      // Rail garden 2: two rails
+      {sx:-4, sz:350, ex:-4, ez:372, h:1.0},
+      {sx:-1, sz:350, ex:-1, ez:372, h:1.0},
+      // Long rail section
+      {sx:-3, sz:470, ex:-3, ez:502, h:1.3},
+      {sx:0, sz:472, ex:0, ez:504, h:1.3},
     ],
     boxes: [
-      {x:-3, z:185, w:2, h:0.5, len:7, rot:0, color:0xFF8800},
-      {x:3, z:187, w:2.5, h:0.55, len:8, rot:0, color:0x0088FF},
-      {x:-3, z:322, w:2, h:0.5, len:7, rot:0, color:0xFF8800},
-      {x:3, z:324, w:2, h:0.6, len:7, rot:0, color:0x00AA44},
+      // Box next to rail garden 1
+      {x:9, z:200, w:2.5, h:0.85, len:18, rot:0, color:0x0088FF},
+      // Standalone boxes
+      {x:-3, z:240, w:2, h:0.5, len:8, rot:0, color:0xFF8800},
+      {x:3, z:240, w:2.5, h:0.55, len:8, rot:0, color:0x0088FF},
+      // Box next to rail garden 2
+      {x:5, z:360, w:2, h:0.9, len:20, rot:0, color:0x00AA44},
+      // Boxes after split jumps
+      {x:-3, z:445, w:2, h:0.5, len:7, rot:0, color:0xFF8800},
+      {x:3, z:447, w:2, h:0.6, len:7, rot:0, color:0x00AA44},
+      // Box next to long rails
+      {x:4, z:486, w:2.5, h:1.1, len:28, rot:0, color:0x888888},
     ],
     trees: []
   },
@@ -794,34 +928,49 @@ const BUILTIN_LEVELS = {
     desc: "A collection of urban street skiing features",
     spawn: [0, 0, 8],
     jumps: [
-      {x:-6, z:50, w:5, len:8, h:1.2, rot:0.1},
-      {x:6, z:90, w:5, len:8, h:1.4, rot:-0.1},
-      {x:0, z:160, w:7, len:10, h:1.8, rot:0},
-      {x:0, z:280, w:8, len:12, h:2.2, rot:0},
-      {x:-5, z:360, w:5, len:8, h:1.5, rot:0.08},
-      {x:5, z:370, w:5, len:8, h:1.5, rot:-0.08},
+      {x:-6, z:55, w:5, len:8, h:1.2, rot:0.1},
+      {x:6, z:110, w:5, len:8, h:1.4, rot:-0.1},
+      {x:0, z:200, w:7, len:10, h:1.8, rot:0},
+      {x:0, z:350, w:8, len:12, h:2.2, rot:0},
+      {x:-5, z:460, w:5, len:8, h:1.5, rot:0.08},
+      {x:5, z:475, w:5, len:8, h:1.5, rot:-0.08},
     ],
     rails: [
-      {sx:-8, sz:30, ex:-8, ez:48, h:0.7},
-      {sx:8, sz:32, ex:8, ez:46, h:0.65},
-      {sx:-3, sz:68, ex:-1, ez:82, h:0.8},
-      {sx:3, sz:70, ex:1, ez:84, h:0.75},
-      {sx:-6, sz:110, ex:-6, ez:132, h:1.0},
-      {sx:0, sz:112, ex:0, ez:130, h:1.1},
-      {sx:6, sz:110, ex:6, ez:128, h:0.9},
-      {sx:-4, sz:200, ex:-4, ez:222, h:1.0},
-      {sx:4, sz:202, ex:4, ez:224, h:0.95},
-      {sx:0, sz:310, ex:0, ez:340, h:1.2},
-      {sx:-6, sz:315, ex:-6, ez:338, h:1.0},
-      {sx:6, sz:313, ex:6, ez:335, h:1.05},
-      {sx:-2, sz:390, ex:-2, ez:420, h:1.1},
-      {sx:2, sz:392, ex:2, ez:418, h:1.0},
+      // Two rails at start
+      {sx:-8, sz:30, ex:-8, ez:50, h:0.7},
+      {sx:-5, sz:30, ex:-5, ez:50, h:0.7},
+      // Kinked rail pair
+      {sx:-4, sz:80, ex:-2, ez:98, h:0.8},
+      {sx:-1, sz:80, ex:1, ez:98, h:0.8},
+      // Rainbow rail
+      {sx:6, sz:140, ex:6, ez:168, h:1.0, rainbow:true},
+      // Double rail set
+      {sx:-5, sz:248, ex:-5, ez:275, h:1.0},
+      {sx:-2, sz:248, ex:-2, ez:275, h:1.0},
+      // Two rails near end
+      {sx:-6, sz:400, ex:-6, ez:428, h:1.0},
+      {sx:-3, sz:400, ex:-3, ez:428, h:1.0},
+      // Long solo rail
+      {sx:-2, sz:510, ex:-2, ez:548, h:1.1},
     ],
     boxes: [
-      {x:0, z:100, w:3, h:0.4, len:8, rot:0, color:0x888888},
-      {x:-5, z:145, w:2, h:0.35, len:6, rot:0.05, color:0x888888},
-      {x:5, z:148, w:2, h:0.4, len:6, rot:-0.05, color:0x888888},
-      {x:0, z:240, w:3, h:0.5, len:10, rot:0, color:0x666666},
+      // Box next to start rails
+      {x:8, z:40, w:2, h:0.65, len:18, rot:0, color:0x888888},
+      // Standalone box
+      {x:0, z:118, w:3, h:0.4, len:8, rot:0, color:0x888888},
+      // Box next to rainbow rail
+      {x:-6, z:154, w:2, h:0.9, len:24, rot:0, color:0x666666},
+      // Angled boxes
+      {x:-5, z:180, w:2, h:0.35, len:6, rot:0.05, color:0x888888},
+      {x:5, z:183, w:2, h:0.4, len:6, rot:-0.05, color:0x888888},
+      // Box next to double rails
+      {x:4, z:262, w:2.5, h:0.95, len:26, rot:0, color:0x666666},
+      // Standalone box
+      {x:0, z:310, w:3, h:0.5, len:12, rot:0, color:0x888888},
+      // Box next to end rails
+      {x:5, z:414, w:2, h:1.0, len:26, rot:0, color:0x888888},
+      // Box next to long rail
+      {x:2, z:530, w:2, h:1.0, len:32, rot:0, color:0x666666},
     ],
     trees: []
   },
@@ -837,10 +986,14 @@ const BUILTIN_LEVELS = {
       {x:0, z:400, w:10, len:16, h:3, rot:0},
     ],
     rails: [
-      {sx:-3, sz:155, ex:-3, ez:170, h:0.6},
-      {sx:4, sz:350, ex:4, ez:368, h:0.8},
+      {sx:-3, sz:170, ex:-3, ez:190, h:0.6},
+      {sx:0, sz:170, ex:0, ez:190, h:0.6},
+      {sx:4, sz:400, ex:4, ez:422, h:0.8, rainbow:true},
     ],
-    boxes: [],
+    boxes: [
+      {x:6, z:180, w:2, h:0.6, len:18, rot:0, color:0x888888},
+      {x:-4, z:411, w:2, h:0.8, len:22, rot:0, color:0x666666},
+    ],
     trees: []
   }
 };
@@ -897,78 +1050,376 @@ const skierParts = {};
 
 function createSkier(){
   const g = new THREE.Group();
-  // Torso
-  const torsoGeo = new THREE.BoxGeometry(0.42, 0.55, 0.28);
-  const torsoMat = new THREE.MeshLambertMaterial({color:0x2244AA});
-  const torso = new THREE.Mesh(torsoGeo, torsoMat);
-  torso.position.y = 0.88;
-  torso.castShadow=true;
-  g.add(torso);
-  // Head
-  const headMat = new THREE.MeshLambertMaterial({color:0xFFCB8E});
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.13,8,6), headMat);
-  head.position.y = 1.28;
-  head.castShadow=true;
-  g.add(head);
+
+  // ---- MATERIALS ----
+  // Jacket: ski jacket with slight sheen
+  const jacketMat = new THREE.MeshStandardMaterial({color:0x1a3a7a, roughness:0.55, metalness:0.05});
+  const jacketAccentMat = new THREE.MeshStandardMaterial({color:0x2e5cb8, roughness:0.5, metalness:0.05});
+  const jacketZipMat = new THREE.MeshStandardMaterial({color:0x888888, roughness:0.3, metalness:0.6});
+  // Pants: dark ski pants
+  const pantsMat = new THREE.MeshStandardMaterial({color:0x1a1a22, roughness:0.65, metalness:0.0});
+  const pantsSeamMat = new THREE.MeshStandardMaterial({color:0x252530, roughness:0.6, metalness:0.0});
+  // Skin
+  const skinMat = new THREE.MeshStandardMaterial({color:0xE8B89D, roughness:0.8, metalness:0.0});
   // Helmet
-  const helmetMat = new THREE.MeshLambertMaterial({color:0x333340});
-  const helmet = new THREE.Mesh(new THREE.SphereGeometry(0.155,8,6), helmetMat);
-  helmet.position.y = 1.33;
-  helmet.castShadow=true;
-  g.add(helmet);
+  const helmetMat = new THREE.MeshStandardMaterial({color:0x222230, roughness:0.35, metalness:0.1});
+  const helmetVentMat = new THREE.MeshStandardMaterial({color:0x111118, roughness:0.5, metalness:0.15});
   // Goggles
-  const gogMat = new THREE.MeshStandardMaterial({color:0xFF6600, metalness:0.3, roughness:0.5});
-  const goggles = new THREE.Mesh(new THREE.BoxGeometry(0.22,0.06,0.08), gogMat);
+  const gogFrameMat = new THREE.MeshStandardMaterial({color:0x222222, roughness:0.4, metalness:0.1});
+  const gogLensMat = new THREE.MeshStandardMaterial({color:0xFF4400, roughness:0.15, metalness:0.4, transparent:true, opacity:0.85});
+  // Gloves
+  const gloveMat = new THREE.MeshStandardMaterial({color:0x1a1a1a, roughness:0.7, metalness:0.0});
+  // Boots
+  const bootMat = new THREE.MeshStandardMaterial({color:0x1a1a20, roughness:0.55, metalness:0.05});
+  const bootBuckleMat = new THREE.MeshStandardMaterial({color:0x666666, roughness:0.3, metalness:0.5});
+  // Skis
+  const skiTopMat = new THREE.MeshStandardMaterial({color:0xCC2222, roughness:0.4, metalness:0.15});
+  const skiBaseMat = new THREE.MeshStandardMaterial({color:0x111111, roughness:0.6, metalness:0.1});
+  const skiEdgeMat = new THREE.MeshStandardMaterial({color:0x888888, roughness:0.2, metalness:0.7});
+  const bindingMat = new THREE.MeshStandardMaterial({color:0x333333, roughness:0.5, metalness:0.3});
+
+  // ---- TORSO (jacket with details) ----
+  const torso = new THREE.Group();
+  // Main jacket body - tapered shape using a cylinder
+  const jacketGeo = new THREE.CylinderGeometry(0.18, 0.22, 0.55, 8);
+  const jacketMesh = new THREE.Mesh(jacketGeo, jacketMat);
+  jacketMesh.castShadow = true;
+  torso.add(jacketMesh);
+  // Shoulder pads
+  const shoulderGeo = new THREE.SphereGeometry(0.1, 6, 4, 0, Math.PI*2, 0, Math.PI*0.5);
+  const lShoulder = new THREE.Mesh(shoulderGeo, jacketAccentMat);
+  lShoulder.position.set(-0.2, 0.2, 0);
+  lShoulder.castShadow = true;
+  torso.add(lShoulder);
+  const rShoulder = new THREE.Mesh(shoulderGeo, jacketAccentMat);
+  rShoulder.position.set(0.2, 0.2, 0);
+  rShoulder.castShadow = true;
+  torso.add(rShoulder);
+  // Zipper line
+  const zipGeo = new THREE.BoxGeometry(0.015, 0.48, 0.01);
+  const zipMesh = new THREE.Mesh(zipGeo, jacketZipMat);
+  zipMesh.position.set(0, 0, 0.17);
+  torso.add(zipMesh);
+  // Collar
+  const collarGeo = new THREE.CylinderGeometry(0.14, 0.16, 0.08, 8);
+  const collarMesh = new THREE.Mesh(collarGeo, jacketAccentMat);
+  collarMesh.position.set(0, 0.28, 0);
+  torso.add(collarMesh);
+  // Hem band at bottom
+  const hemGeo = new THREE.CylinderGeometry(0.225, 0.22, 0.04, 8);
+  const hemMesh = new THREE.Mesh(hemGeo, jacketAccentMat);
+  hemMesh.position.set(0, -0.26, 0);
+  torso.add(hemMesh);
+  torso.position.y = 0.88;
+  torso.castShadow = true;
+  g.add(torso);
+
+  // ---- HEAD ----
+  const head = new THREE.Group();
+  // Skull with slight vertical stretch
+  const skullGeo = new THREE.SphereGeometry(0.12, 10, 8);
+  const skull = new THREE.Mesh(skullGeo, skinMat);
+  skull.scale.set(1, 1.1, 1);
+  skull.castShadow = true;
+  head.add(skull);
+  // Chin
+  const chinGeo = new THREE.SphereGeometry(0.06, 6, 4);
+  const chin = new THREE.Mesh(chinGeo, skinMat);
+  chin.position.set(0, -0.08, 0.04);
+  head.add(chin);
+  // Neck (connects head to torso)
+  const neckGeo = new THREE.CylinderGeometry(0.05, 0.06, 0.1, 6);
+  const neck = new THREE.Mesh(neckGeo, skinMat);
+  neck.position.set(0, -0.14, 0);
+  head.add(neck);
+  head.position.y = 1.28;
+  head.castShadow = true;
+  g.add(head);
+
+  // ---- HELMET ----
+  const helmet = new THREE.Group();
+  const helmetShellGeo = new THREE.SphereGeometry(0.155, 12, 8);
+  const helmetShell = new THREE.Mesh(helmetShellGeo, helmetMat);
+  helmetShell.scale.set(1.05, 1.0, 1.1);
+  helmetShell.castShadow = true;
+  helmet.add(helmetShell);
+  // Helmet visor brim
+  const brimGeo = new THREE.BoxGeometry(0.24, 0.02, 0.08);
+  const brim = new THREE.Mesh(brimGeo, helmetMat);
+  brim.position.set(0, -0.04, 0.14);
+  brim.rotation.x = 0.15;
+  helmet.add(brim);
+  // Vent slots on top
+  for(let i = -1; i <= 1; i++){
+    const ventGeo = new THREE.BoxGeometry(0.04, 0.01, 0.12);
+    const vent = new THREE.Mesh(ventGeo, helmetVentMat);
+    vent.position.set(i * 0.055, 0.14, 0);
+    helmet.add(vent);
+  }
+  // Rear adjustment dial
+  const dialGeo = new THREE.CylinderGeometry(0.025, 0.025, 0.015, 8);
+  const dial = new THREE.Mesh(dialGeo, jacketZipMat);
+  dial.position.set(0, -0.02, -0.15);
+  dial.rotation.x = Math.PI * 0.5;
+  helmet.add(dial);
+  helmet.position.y = 1.33;
+  helmet.castShadow = true;
+  g.add(helmet);
+
+  // ---- GOGGLES ----
+  const goggles = new THREE.Group();
+  // Frame
+  const gogFrameGeo = new THREE.TorusGeometry(0.07, 0.012, 6, 16, Math.PI);
+  const gogFrame = new THREE.Mesh(gogFrameGeo, gogFrameMat);
+  gogFrame.rotation.set(0, 0, Math.PI);
+  gogFrame.position.y = 0.01;
+  goggles.add(gogFrame);
+  // Lens - curved
+  const gogLensGeo = new THREE.SphereGeometry(0.085, 12, 6, -Math.PI*0.45, Math.PI*0.9, Math.PI*0.25, Math.PI*0.35);
+  const gogLens = new THREE.Mesh(gogLensGeo, gogLensMat);
+  gogLens.position.set(0, 0, 0.03);
+  goggles.add(gogLens);
+  // Foam padding (behind lens)
+  const foamGeo = new THREE.BoxGeometry(0.2, 0.05, 0.02);
+  const foamMat = new THREE.MeshLambertMaterial({color:0x444444});
+  const foam = new THREE.Mesh(foamGeo, foamMat);
+  foam.position.set(0, 0, -0.02);
+  goggles.add(foam);
+  // Strap hints on sides
+  const strapGeo = new THREE.BoxGeometry(0.03, 0.025, 0.04);
+  const strapMat = new THREE.MeshLambertMaterial({color:0x333333});
+  const lStrap = new THREE.Mesh(strapGeo, strapMat);
+  lStrap.position.set(-0.1, 0, -0.01);
+  goggles.add(lStrap);
+  const rStrap = new THREE.Mesh(strapGeo, strapMat);
+  rStrap.position.set(0.1, 0, -0.01);
+  goggles.add(rStrap);
   goggles.position.set(0, 1.28, 0.12);
   g.add(goggles);
-  // Arms
-  const armMat = new THREE.MeshLambertMaterial({color:0x2244AA});
-  const armGeo = new THREE.BoxGeometry(0.11, 0.45, 0.11);
-  const lArm = new THREE.Mesh(armGeo, armMat);
+
+  // ---- ARMS (jacket sleeves + glove hands) ----
+  function makeArm(side){
+    const arm = new THREE.Group();
+    // Upper arm (sleeve)
+    const upperGeo = new THREE.CylinderGeometry(0.055, 0.06, 0.24, 6);
+    const upper = new THREE.Mesh(upperGeo, jacketMat);
+    upper.position.y = 0.1;
+    upper.castShadow = true;
+    arm.add(upper);
+    // Lower arm / forearm
+    const lowerGeo = new THREE.CylinderGeometry(0.05, 0.055, 0.22, 6);
+    const lower = new THREE.Mesh(lowerGeo, jacketAccentMat);
+    lower.position.y = -0.1;
+    lower.castShadow = true;
+    arm.add(lower);
+    // Cuff
+    const cuffGeo = new THREE.CylinderGeometry(0.058, 0.053, 0.03, 6);
+    const cuff = new THREE.Mesh(cuffGeo, jacketMat);
+    cuff.position.y = -0.2;
+    arm.add(cuff);
+    // Glove
+    const gloveGeo = new THREE.SphereGeometry(0.05, 6, 5);
+    const glove = new THREE.Mesh(gloveGeo, gloveMat);
+    glove.scale.set(0.9, 1.2, 1.0);
+    glove.position.y = -0.26;
+    glove.castShadow = true;
+    arm.add(glove);
+    // Ski pole - attached at glove
+    const poleShaftMat = new THREE.MeshStandardMaterial({color:0x222222, roughness:0.3, metalness:0.6});
+    const poleGripMat = new THREE.MeshStandardMaterial({color:0x333333, roughness:0.7, metalness:0.0});
+    const poleBasketMat = new THREE.MeshStandardMaterial({color:0x444444, roughness:0.5, metalness:0.3});
+    const poleTipMat = new THREE.MeshStandardMaterial({color:0x999999, roughness:0.2, metalness:0.8});
+    // Shaft
+    const shaftGeo = new THREE.CylinderGeometry(0.012, 0.01, 1.1, 6);
+    const shaft = new THREE.Mesh(shaftGeo, poleShaftMat);
+    shaft.position.set(0, -0.26 - 0.55, 0.02);
+    shaft.castShadow = true;
+    arm.add(shaft);
+    // Grip (top of pole, near hand)
+    const gripGeo = new THREE.CylinderGeometry(0.018, 0.015, 0.1, 6);
+    const grip = new THREE.Mesh(gripGeo, poleGripMat);
+    grip.position.set(0, -0.26 + 0.02, 0.02);
+    arm.add(grip);
+    // Basket (near bottom)
+    const basketGeo = new THREE.TorusGeometry(0.04, 0.006, 4, 8);
+    const basket = new THREE.Mesh(basketGeo, poleBasketMat);
+    basket.rotation.x = Math.PI * 0.5;
+    basket.position.set(0, -0.26 - 1.0, 0.02);
+    arm.add(basket);
+    // Tip (very bottom)
+    const tipPoleGeo = new THREE.ConeGeometry(0.01, 0.04, 4);
+    const tipPole = new THREE.Mesh(tipPoleGeo, poleTipMat);
+    tipPole.position.set(0, -0.26 - 1.12, 0.02);
+    arm.add(tipPole);
+    return arm;
+  }
+  const lArm = makeArm(-1);
   lArm.position.set(-0.30, 0.82, 0);
-  lArm.castShadow=true;
+  lArm.castShadow = true;
   g.add(lArm);
-  const rArm = new THREE.Mesh(armGeo, armMat);
+  const rArm = makeArm(1);
   rArm.position.set(0.30, 0.82, 0);
-  rArm.castShadow=true;
+  rArm.castShadow = true;
   g.add(rArm);
-  // Legs
-  const legMat = new THREE.MeshLambertMaterial({color:0x1A1A1A});
-  const legGeo = new THREE.BoxGeometry(0.13, 0.48, 0.13);
-  const lLeg = new THREE.Mesh(legGeo, legMat);
+
+  // ---- LEGS (ski pants with detail) ----
+  function makeLeg(side){
+    const leg = new THREE.Group();
+    // Upper thigh
+    const thighGeo = new THREE.CylinderGeometry(0.07, 0.075, 0.26, 6);
+    const thigh = new THREE.Mesh(thighGeo, pantsMat);
+    thigh.position.y = 0.1;
+    thigh.castShadow = true;
+    leg.add(thigh);
+    // Lower leg / shin
+    const shinGeo = new THREE.CylinderGeometry(0.06, 0.065, 0.24, 6);
+    const shin = new THREE.Mesh(shinGeo, pantsMat);
+    shin.position.y = -0.1;
+    shin.castShadow = true;
+    leg.add(shin);
+    // Knee pad area
+    const kneeGeo = new THREE.SphereGeometry(0.06, 6, 4);
+    const knee = new THREE.Mesh(kneeGeo, pantsSeamMat);
+    knee.scale.set(1, 0.7, 1.1);
+    knee.position.set(0, 0, 0.03);
+    leg.add(knee);
+    // Side seam stripe
+    const seam = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.44, 0.01), pantsSeamMat);
+    seam.position.set(side * 0.065, 0, 0);
+    leg.add(seam);
+    return leg;
+  }
+  const lLeg = makeLeg(-1);
   lLeg.position.set(-0.11, 0.34, 0);
-  lLeg.castShadow=true;
+  lLeg.castShadow = true;
   g.add(lLeg);
-  const rLeg = new THREE.Mesh(legGeo, legMat);
+  const rLeg = makeLeg(1);
   rLeg.position.set(0.11, 0.34, 0);
-  rLeg.castShadow=true;
+  rLeg.castShadow = true;
   g.add(rLeg);
-  // Boots
-  const bootMat = new THREE.MeshLambertMaterial({color:0x222222});
-  const bootGeo = new THREE.BoxGeometry(0.14, 0.12, 0.22);
-  const lBoot = new THREE.Mesh(bootGeo, bootMat);
+
+  // ---- BOOTS (ski boots with buckles) ----
+  function makeBoot(side){
+    const boot = new THREE.Group();
+    // Main shell
+    const shellGeo = new THREE.BoxGeometry(0.14, 0.13, 0.22);
+    const shell = new THREE.Mesh(shellGeo, bootMat);
+    shell.castShadow = true;
+    boot.add(shell);
+    // Rounded toe
+    const toeGeo = new THREE.SphereGeometry(0.06, 6, 4, 0, Math.PI*2, 0, Math.PI*0.5);
+    const toe = new THREE.Mesh(toeGeo, bootMat);
+    toe.rotation.x = -Math.PI * 0.5;
+    toe.position.set(0, -0.02, 0.1);
+    boot.add(toe);
+    // Cuff / upper boot
+    const cuffGeo = new THREE.CylinderGeometry(0.065, 0.07, 0.06, 6);
+    const cuff = new THREE.Mesh(cuffGeo, bootMat);
+    cuff.position.set(0, 0.08, 0);
+    boot.add(cuff);
+    // Buckles (3)
+    for(let i = 0; i < 3; i++){
+      const buckleGeo = new THREE.BoxGeometry(0.02, 0.015, 0.04);
+      const buckle = new THREE.Mesh(buckleGeo, bootBuckleMat);
+      buckle.position.set(side * 0.07, 0.06 - i * 0.04, 0.04);
+      boot.add(buckle);
+    }
+    // Sole
+    const soleGeo = new THREE.BoxGeometry(0.14, 0.02, 0.24);
+    const soleMat = new THREE.MeshLambertMaterial({color:0x111111});
+    const sole = new THREE.Mesh(soleGeo, soleMat);
+    sole.position.y = -0.065;
+    boot.add(sole);
+    return boot;
+  }
+  const lBoot = makeBoot(-1);
   lBoot.position.set(-0.11, 0.08, 0.04);
   g.add(lBoot);
-  const rBoot = new THREE.Mesh(bootGeo, bootMat);
+  const rBoot = makeBoot(1);
   rBoot.position.set(0.11, 0.08, 0.04);
   g.add(rBoot);
-  // Skis
-  const skiMat = new THREE.MeshStandardMaterial({color:0xCC2222, metalness:0.2, roughness:0.6});
-  const skiGeo = new THREE.BoxGeometry(0.08, 0.025, 1.75);
-  const lSki = new THREE.Mesh(skiGeo, skiMat);
+
+  // ---- SKIS (layered with edges, base, top sheet, bindings) ----
+  function makeSki(side){
+    const ski = new THREE.Group();
+    // Main ski body - top sheet
+    const topGeo = new THREE.BoxGeometry(0.085, 0.012, 1.75);
+    const top = new THREE.Mesh(topGeo, skiTopMat);
+    top.position.y = 0.006;
+    top.castShadow = true;
+    ski.add(top);
+    // Base (underside, slightly dark)
+    const baseGeo = new THREE.BoxGeometry(0.082, 0.008, 1.74);
+    const base = new THREE.Mesh(baseGeo, skiBaseMat);
+    base.position.y = -0.004;
+    ski.add(base);
+    // Metal edges (thin strips on each side)
+    const edgeGeo = new THREE.BoxGeometry(0.004, 0.018, 1.74);
+    const lEdge = new THREE.Mesh(edgeGeo, skiEdgeMat);
+    lEdge.position.set(-0.043, 0, 0);
+    ski.add(lEdge);
+    const rEdge = new THREE.Mesh(edgeGeo, skiEdgeMat);
+    rEdge.position.set(0.043, 0, 0);
+    ski.add(rEdge);
+    // Tip curve (rounded nose)
+    const tipGeo = new THREE.SphereGeometry(0.042, 6, 4, 0, Math.PI*2, 0, Math.PI*0.4);
+    const tip = new THREE.Mesh(tipGeo, skiTopMat);
+    tip.rotation.x = -Math.PI * 0.5;
+    tip.position.set(0, 0.01, 0.87);
+    tip.scale.set(1, 0.4, 1);
+    ski.add(tip);
+    // Tail curve
+    const tailGeo = new THREE.SphereGeometry(0.035, 6, 4, 0, Math.PI*2, 0, Math.PI*0.35);
+    const tail = new THREE.Mesh(tailGeo, skiTopMat);
+    tail.rotation.x = Math.PI * 0.5;
+    tail.position.set(0, 0.008, -0.87);
+    tail.scale.set(1, 0.4, 1);
+    ski.add(tail);
+    // Binding - toe piece
+    const toeBindGeo = new THREE.BoxGeometry(0.06, 0.035, 0.05);
+    const toeBind = new THREE.Mesh(toeBindGeo, bindingMat);
+    toeBind.position.set(0, 0.025, 0.08);
+    ski.add(toeBind);
+    // Binding - heel piece
+    const heelBindGeo = new THREE.BoxGeometry(0.055, 0.04, 0.05);
+    const heelBind = new THREE.Mesh(heelBindGeo, bindingMat);
+    heelBind.position.set(0, 0.028, -0.08);
+    ski.add(heelBind);
+    // Binding base plate
+    const platGeo = new THREE.BoxGeometry(0.075, 0.008, 0.25);
+    const plate = new THREE.Mesh(platGeo, bindingMat);
+    plate.position.set(0, 0.015, 0);
+    ski.add(plate);
+    // Graphic stripe on top
+    const stripeGeo = new THREE.BoxGeometry(0.06, 0.001, 0.6);
+    const stripeMat = new THREE.MeshStandardMaterial({color:0xFFFFFF, roughness:0.5, metalness:0.1});
+    const stripe = new THREE.Mesh(stripeGeo, stripeMat);
+    stripe.position.set(0, 0.013, 0.25);
+    ski.add(stripe);
+    // Small logo dot
+    const logoGeo = new THREE.CircleGeometry(0.015, 8);
+    const logoMat = new THREE.MeshStandardMaterial({color:0xFFFFFF, roughness:0.4, metalness:0.1});
+    const logo = new THREE.Mesh(logoGeo, logoMat);
+    logo.rotation.x = -Math.PI * 0.5;
+    logo.position.set(0, 0.014, 0.55);
+    ski.add(logo);
+    return ski;
+  }
+  const lSki = makeSki(-1);
   lSki.position.set(-0.11, 0.012, 0.1);
-  lSki.castShadow=true;
+  lSki.castShadow = true;
   g.add(lSki);
-  const rSki = new THREE.Mesh(skiGeo, skiMat);
+  const rSki = makeSki(1);
   rSki.position.set(0.11, 0.012, 0.1);
-  rSki.castShadow=true;
+  rSki.castShadow = true;
   g.add(rSki);
+
   // Ski tips (hidden - kept for compatibility)
   const tipGeo = new THREE.BoxGeometry(0.08, 0.025, 0.15);
-  const lTip = new THREE.Mesh(tipGeo, skiMat);
+  const lTip = new THREE.Mesh(tipGeo, skiTopMat);
   lTip.visible = false;
   g.add(lTip);
-  const rTip = new THREE.Mesh(tipGeo, skiMat);
+  const rTip = new THREE.Mesh(tipGeo, skiTopMat);
   rTip.visible = false;
   g.add(rTip);
 
@@ -1040,6 +1491,11 @@ const sk = {
   railT: 0,
   railBalance: 0, // -1 to 1, 0 = centered
 
+  // Rail magnet system
+  railTime: 0, // time spent on current rail
+  railMagnetActive: false, // true when locked onto rail
+  railMagnetIndex: -1, // index of rail we're magneted to
+
   // Butter
   butterAmount: 0,
   butterDir: 0, // -1 nose, 1 tail
@@ -1069,6 +1525,15 @@ const sk = {
     armSpreadR: 0,
     armForwardL: -0.15,
     armForwardR: -0.15,
+    // Arm physics swing (pendulum response to forces)
+    armSwingL: 0, // lateral swing angle
+    armSwingR: 0,
+    armSwingVelL: 0, // swing velocity
+    armSwingVelR: 0,
+    armPendulumL: 0, // forward/back pendulum
+    armPendulumR: 0,
+    armPendulumVelL: 0,
+    armPendulumVelR: 0,
     skiRollL: 0,
     skiRollR: 0,
     skiPitchL: 0,
@@ -1076,6 +1541,9 @@ const sk = {
     headLook: 0,
     impactAbsorb: 0, // landing compression
     angulationAmount: 0, // hip angulation in turns
+    prevVelX: 0,
+    prevVelY: 0,
+    prevVelZ: 0,
   },
 };
 
@@ -1093,6 +1561,7 @@ function resetSkier(spawnPos){
   sk.tuckAmount = 0; sk.airTime = 0;
   sk.currentGrab = null; sk.grabKeys = {}; sk.isTweaked = false; sk.grabs = [];
   sk.currentRail = null; sk.railT = 0; sk.railBalance = 0;
+  sk.railTime = 0; sk.railMagnetActive = false; sk.railMagnetIndex = -1;
   sk.butterAmount = 0; sk.butterDir = 0;
   sk.steerInput = 0; sk.crashTimer = 0; sk.onJump = false;
   sk.trickTakeoffSwitch = false;
@@ -1105,8 +1574,11 @@ function resetAnimState(){
   a.hipOffset.set(0,0,0); a.torsoLean=0; a.torsoTwist=0; a.shoulderDrop=0;
   a.kneeBendL=0.3; a.kneeBendR=0.3; a.ankleFlexL=0; a.ankleFlexR=0;
   a.armSpreadL=0; a.armSpreadR=0; a.armForwardL=-0.15; a.armForwardR=-0.15;
+  a.armSwingL=0; a.armSwingR=0; a.armSwingVelL=0; a.armSwingVelR=0;
+  a.armPendulumL=0; a.armPendulumR=0; a.armPendulumVelL=0; a.armPendulumVelR=0;
   a.skiRollL=0; a.skiRollR=0; a.skiPitchL=0; a.skiPitchR=0;
   a.headLook=0; a.impactAbsorb=0; a.angulationAmount=0;
+  a.prevVelX=0; a.prevVelY=0; a.prevVelZ=0;
 }
 
 // ============================================================
@@ -1452,7 +1924,10 @@ function updateGround(dt){
   if(sk.steerInput !== 0){
     // Turn rate depends on edge angle and carving state
     let turnGrip;
-    if(sk.carving){
+    if(sk.state === 'butter'){
+      // Butter: much faster turning, can spin past 180+
+      turnGrip = EDGE_GRIP_BASE * 3.5 * (1 + sk.speed * 0.03);
+    } else if(sk.carving){
       // Carving: high grip, speed-dependent arc
       turnGrip = EDGE_GRIP_BASE * 1.1 * (1 + sk.speed * 0.015);
       sk.skidAmount = lerp(sk.skidAmount, 0, 1 - Math.exp(-6 * dt));
@@ -1461,7 +1936,7 @@ function updateGround(dt){
       turnGrip = EDGE_GRIP_BASE * (0.5 + sk.speed * 0.04);
       sk.skidAmount = lerp(sk.skidAmount, clamp(1 - absEdge / CARVE_THRESHOLD, 0.2, 1), 1 - Math.exp(-4 * dt));
     }
-    const turnDelta = sk.steerInput * turnGrip * dt * (sk.isSwitch ? -1 : 1);
+    const turnDelta = sk.steerInput * turnGrip * dt * (sk.isSwitch ? 1 : 1);
     sk.facing += turnDelta;
     sk.camFacing += turnDelta;
     sk.travelDir += turnDelta;
@@ -1497,23 +1972,23 @@ function updateGround(dt){
     sk.vel.copy(newDir.multiplyScalar(speed));
   }
 
-  // Forward push (W)
-  if(keys['KeyW']){
+  // Forward push (W or Up arrow)
+  if(keys['KeyW'] || keys['ArrowUp']){
     sk.vel.add(moveFwd.clone().multiplyScalar(PUSH_ACCEL * dt));
   }
 
-  // Brake (S)
-  if(keys['KeyS']){
+  // Brake (S or Down arrow)
+  if(keys['KeyS'] || keys['ArrowDown']){
     sk.vel.multiplyScalar(1 - FRICTION_BRAKE * dt * 60);
     sk.skidAmount = lerp(sk.skidAmount, 0.8, 1 - Math.exp(-4*dt));
   }
 
-  // Forward friction (icy on rails/boxes)
-  const onIce = isOnIcySurface(sk.pos.x, sk.pos.z);
-  const fwdFric = onIce ? FRICTION_FWD * 0.3 : FRICTION_FWD;
+  // Forward friction (icy on rails/boxes or during butter)
+  const onIce = isOnIcySurface(sk.pos.x, sk.pos.z) || sk.state === 'butter';
+  const fwdFric = onIce ? FRICTION_FWD * 0.15 : FRICTION_FWD;
   sk.vel.multiplyScalar(1 - fwdFric * dt * 60);
 
-  // On icy surface: also reduce side friction dramatically
+  // On icy surface or butter: also reduce side friction dramatically
   sk.onIcySurface = onIce;
 
   // ---- SPRING-DAMPER LEGS ----
@@ -1548,6 +2023,7 @@ function updateGround(dt){
     sk.trickTakeoffSwitch = sk.isSwitch;
     sk.popCharge = 0;
     sk.legCompression = LEG_MIN; sk.legVel = -2; // snap extend
+    sk.railTime = 0; sk.railMagnetActive = false; sk.railMagnetIndex = -1;
     sk.lastGoodPos.copy(sk.pos);
     sk.lastGoodFacing = sk.facing;
     playSound('pop', 0.3);
@@ -1567,15 +2043,12 @@ function updateGround(dt){
     } else {
       sk.butterDir = keys['KeyW'] ? -1 : 1;
       sk.butterAmount = clamp(sk.butterAmount + dt, 0, 1);
-      sk.vel.multiplyScalar(1 - BUTTER_FRICTION * dt * 60);
+      // Very slippery - like sliding on a box, minimal friction
       score += Math.floor(dt * 25);
     }
   }
 
-  // Switch toggle
-  if(keysJustPressed['Tab']){
-    sk.isSwitch = !sk.isSwitch;
-  }
+  // Auto-switch handles stance now, Tab removed
 
   // Auto-switch: if body is facing uphill (against velocity), toggle to switch
   if(sk.speed > 1.5){
@@ -1594,6 +2067,51 @@ function updateGround(dt){
   // ---- POSITION UPDATE ----
   sk.pos.add(sk.vel.clone().multiplyScalar(dt));
 
+  // ---- RAIL MAGNET SYSTEM ----
+  const railInfo = getOnRailInfo(sk.pos.x, sk.pos.z);
+  if(railInfo){
+    if(railInfo.index === sk.railMagnetIndex){
+      // Still on same rail - accumulate time
+      sk.railTime += dt;
+    } else {
+      // Entered a new rail
+      sk.railMagnetIndex = railInfo.index;
+      sk.railTime = 0;
+      sk.railMagnetActive = false;
+    }
+    const MAGNET_LOCK_TIME = 0.2; // seconds before magnet activates
+    if(sk.railTime >= MAGNET_LOCK_TIME){
+      sk.railMagnetActive = true;
+      // Smoothly pull skier toward rail center line
+      const magnetStrength = clamp((sk.railTime - MAGNET_LOCK_TIME) * 2.5, 0, 1); // ramp up over 0.4s
+      const pullFactor = 1 - Math.exp(-12 * magnetStrength * dt);
+      sk.pos.x = lerp(sk.pos.x, railInfo.centerX, pullFactor);
+      sk.pos.z = lerp(sk.pos.z, railInfo.centerZ + sk.vel.z * dt, pullFactor * 0.3); // gentle along-rail correction
+      // Also steer velocity to align with rail direction
+      const speed = sk.speed;
+      if(speed > 0.5 && magnetStrength > 0.3){
+        const velAngle = Math.atan2(sk.vel.x, sk.vel.z);
+        const railAngle = Math.atan2(railInfo.dirX, railInfo.dirZ);
+        // Pick closest direction (rail can be traversed either way)
+        let angleDiff = railAngle - velAngle;
+        while(angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+        while(angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+        if(Math.abs(angleDiff) > Math.PI * 0.5){
+          angleDiff = angleDiff > 0 ? angleDiff - Math.PI : angleDiff + Math.PI;
+        }
+        const steerPull = clamp(magnetStrength * 0.4, 0, 0.3);
+        const newAngle = velAngle + angleDiff * steerPull * dt * 4;
+        sk.vel.x = Math.sin(newAngle) * speed;
+        sk.vel.z = Math.cos(newAngle) * speed;
+      }
+    }
+  } else {
+    // Not on any rail
+    sk.railTime = 0;
+    sk.railMagnetActive = false;
+    sk.railMagnetIndex = -1;
+  }
+
   // Score for sliding on features
   if(isOnIcySurface(sk.pos.x, sk.pos.z) && sk.speed > 2){
     score += Math.floor(dt * 50);
@@ -1611,6 +2129,7 @@ function updateGround(dt){
     sk.grabs = []; sk.currentGrab = null;
     sk.airTime = 0; sk.tuckAmount = 0;
     sk.trickTakeoffSwitch = sk.isSwitch;
+    sk.railTime = 0; sk.railMagnetActive = false; sk.railMagnetIndex = -1;
     sk.lastGoodPos.copy(sk.pos);
     sk.lastGoodFacing = sk.facing;
   } else {
@@ -1641,8 +2160,8 @@ function updateAir(dt){
   sk.vel.multiplyScalar(AIR_DRAG);
 
   // Tuck: crouch in air reduces inertia (spin/flip faster)
-  const anyFlipInput = keys['KeyQ'] || keys['KeyE'] || keys['KeyW'] || keys['KeyS'] || keys['ArrowUp'] || keys['ArrowDown'];
-  const anyGrab = sk.currentGrab !== null;
+  const anyFlipInput = keys['KeyW'] || keys['KeyS'];
+  const anyGrab = false;
   if(keys['Space'] || anyGrab){
     sk.tuckAmount = lerp(sk.tuckAmount, 1, 1 - Math.exp(-5 * dt));
   } else if(!anyFlipInput){
@@ -1677,22 +2196,9 @@ function updateAir(dt){
   }
   sk.totalFlip += sk.flipVel * dt;
 
-  // Grabs
-  const grabName = getGrabName();
-  if(grabName){
-    if(sk.currentGrab !== grabName){
-      if(sk.currentGrab) sk.grabs.push({name:sk.currentGrab, tweaked:sk.isTweaked});
-      sk.currentGrab = grabName;
-      sk.isTweaked = false;
-      playSound('grab', 0.15);
-    }
-    if(keys['KeyT']) sk.isTweaked = true;
-  } else {
-    if(sk.currentGrab){
-      sk.grabs.push({name:sk.currentGrab, tweaked:sk.isTweaked});
-      sk.currentGrab = null; sk.isTweaked = false;
-    }
-  }
+  // Grabs disabled
+  sk.currentGrab = null;
+  sk.isTweaked = false;
 
   sk.airTime += dt;
   sk.pos.add(sk.vel.clone().multiplyScalar(dt));
@@ -2055,6 +2561,54 @@ function updateAnimationState(dt){
     a.skiRollR = lerp(a.skiRollR, 0, 1-Math.exp(-8*dt));
     a.headLook = lerp(a.headLook, 0, 1-Math.exp(-3*dt));
   }
+
+  // ---- ARM PHYSICS SWING (applied to all states) ----
+  // Simulate pendulum-like arm response to acceleration, turning, landing, spinning
+  const accelX = (sk.vel.x - (a.prevVelX || 0)) / Math.max(dt, 0.001);
+  const accelY = (sk.vel.y - (a.prevVelY || 0)) / Math.max(dt, 0.001);
+  const accelZ = (sk.vel.z - (a.prevVelZ || 0)) / Math.max(dt, 0.001);
+  a.prevVelX = sk.vel.x;
+  a.prevVelY = sk.vel.y;
+  a.prevVelZ = sk.vel.z;
+
+  // Clamp acceleration to avoid extreme spikes
+  const ax = clamp(accelX, -80, 80);
+  const ay = clamp(accelY, -80, 80);
+  const az = clamp(accelZ, -80, 80);
+
+  // Convert world accel to local (relative to skier facing)
+  const cosF = Math.cos(sk.facing), sinF = Math.sin(sk.facing);
+  const localAccelSide = ax * cosF - az * sinF; // lateral
+  const localAccelFwd = ax * sinF + az * cosF; // forward/back
+
+  // Spin torque on arms: spinning causes arms to swing outward
+  const spinEffect = sk.spinVel * 0.08;
+
+  // Lateral swing (spring-damper pendulum)
+  const swingStiffness = 25;
+  const swingDamping = 6;
+  const lateralDrive = -localAccelSide * 0.006 + spinEffect;
+
+  a.armSwingVelL += (-swingStiffness * a.armSwingL - swingDamping * a.armSwingVelL + lateralDrive * swingStiffness) * dt;
+  a.armSwingL += a.armSwingVelL * dt;
+  a.armSwingL = clamp(a.armSwingL, -0.6, 0.6);
+
+  a.armSwingVelR += (-swingStiffness * a.armSwingR - swingDamping * a.armSwingVelR - lateralDrive * swingStiffness) * dt;
+  a.armSwingR += a.armSwingVelR * dt;
+  a.armSwingR = clamp(a.armSwingR, -0.6, 0.6);
+
+  // Forward/back pendulum (landing impact, braking, acceleration)
+  const fwdDrive = -localAccelFwd * 0.005 - ay * 0.004;
+  const pendStiffness = 20;
+  const pendDamping = 5.5;
+
+  a.armPendulumVelL += (-pendStiffness * a.armPendulumL - pendDamping * a.armPendulumVelL + fwdDrive * pendStiffness) * dt;
+  a.armPendulumL += a.armPendulumVelL * dt;
+  a.armPendulumL = clamp(a.armPendulumL, -0.5, 0.5);
+
+  a.armPendulumVelR += (-pendStiffness * a.armPendulumR - pendDamping * a.armPendulumVelR + fwdDrive * pendStiffness) * dt;
+  a.armPendulumR += a.armPendulumVelR * dt;
+  a.armPendulumR = clamp(a.armPendulumR, -0.5, 0.5);
 }
 
 function updateSkierModel(dt){
@@ -2076,8 +2630,8 @@ function updateSkierModel(dt){
     skierParts.head.position.set(0, 1.28, 0); skierParts.head.rotation.set(0,0,0);
     skierParts.helmet.position.set(0, 1.33, 0); skierParts.helmet.rotation.set(0,0,0);
     skierParts.goggles.position.set(0, 1.28, 0.12); skierParts.goggles.rotation.set(0,0,0);
-    skierParts.lArm.position.set(-0.30, 0.82, 0); skierParts.lArm.rotation.set(0,0,0);
-    skierParts.rArm.position.set(0.30, 0.82, 0); skierParts.rArm.rotation.set(0,0,0);
+    skierParts.lArm.position.set(-0.24, 0.90, 0.04); skierParts.lArm.rotation.set(0,0,0);
+    skierParts.rArm.position.set(0.24, 0.90, 0.04); skierParts.rArm.rotation.set(0,0,0);
     skierParts.lLeg.position.set(-0.11, 0.34, 0); skierParts.lLeg.rotation.set(0,0,0); skierParts.lLeg.scale.y=1;
     skierParts.rLeg.position.set(0.11, 0.34, 0); skierParts.rLeg.rotation.set(0,0,0); skierParts.rLeg.scale.y=1;
     skierParts.lBoot.position.set(-0.11, 0.08, 0.04); skierParts.lBoot.rotation.set(0,0,0);
@@ -2166,24 +2720,48 @@ function updateSkierModel(dt){
   skierParts.goggles.position.set(a.hipOffset.x * 0.3, headY, 0.12);
   skierParts.goggles.rotation.y = a.headLook;
 
-  // ---- ARMS LAYER ----
+  // ---- ARMS LAYER (connected to torso at shoulders, with physics swing) ----
+  // Shoulder attachment points follow torso position
+  const torsoX = a.hipOffset.x + a.angulationAmount * 0.15;
+  const torsoY = 0.88 + a.hipOffset.y;
+  const shoulderOffsetY = 0.2; // shoulder height above torso center
+  const shoulderWidth = 0.24; // half-width from torso center to shoulder
+
   if(sk.state === 'air' && sk.currentGrab){
     // Grab poses override arms
     applyGrabPose(sk.currentGrab, sk.isTweaked, compressionY);
   } else {
-    // Physics-driven arm positions
+    // Left arm: attached at left shoulder, swings with physics
+    const lShoulderX = torsoX - shoulderWidth;
+    const lShoulderY = torsoY + shoulderOffsetY;
+    const lSwingZ = a.armSwingL; // lateral swing from physics
+    const lPendX = a.armPendulumL; // forward/back swing from physics
     skierParts.lArm.position.set(
-      -0.30 - a.armSpreadL,
-      0.82 + a.hipOffset.y,
-      0.08
+      lShoulderX - a.armSpreadL * 0.6,
+      lShoulderY - 0.18,
+      0.04
     );
-    skierParts.lArm.rotation.set(a.armForwardL, 0, -a.armSpreadL * 0.5);
+    skierParts.lArm.rotation.set(
+      a.armForwardL + lPendX,
+      lSwingZ * 0.3,
+      -a.armSpreadL * 0.5 + lSwingZ
+    );
+
+    // Right arm: attached at right shoulder, swings with physics
+    const rShoulderX = torsoX + shoulderWidth;
+    const rShoulderY = torsoY + shoulderOffsetY;
+    const rSwingZ = a.armSwingR;
+    const rPendX = a.armPendulumR;
     skierParts.rArm.position.set(
-      0.30 + a.armSpreadR,
-      0.82 + a.hipOffset.y,
-      0.08
+      rShoulderX + a.armSpreadR * 0.6,
+      rShoulderY - 0.18,
+      0.04
     );
-    skierParts.rArm.rotation.set(a.armForwardR, 0, a.armSpreadR * 0.5);
+    skierParts.rArm.rotation.set(
+      a.armForwardR + rPendX,
+      -rSwingZ * 0.3,
+      a.armSpreadR * 0.5 + rSwingZ
+    );
   }
 
   // ---- LEAN: whole body inclination into turns ----
