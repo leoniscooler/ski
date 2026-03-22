@@ -460,7 +460,7 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.setClearColor(0x87CEEB);
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.FogExp2(0xCCDDEE, 0.004);
+scene.fog = new THREE.Fog(0xC8D8E8, 80, 500);
 
 const camera = new THREE.PerspectiveCamera(62, window.innerWidth/window.innerHeight, 0.1, 800);
 camera.position.set(0, 65, -5);
@@ -676,10 +676,10 @@ function setupCustomizeInputs(){
   });
 }
 
-const ambientLight = new THREE.AmbientLight(0x8899BB, 0.45);
+const ambientLight = new THREE.AmbientLight(0x8899BB, 0.5);
 scene.add(ambientLight);
 
-const hemiLight = new THREE.HemisphereLight(0x88BBEE, 0xDDD8CC, 0.35);
+const hemiLight = new THREE.HemisphereLight(0x88BBEE, 0xDDD8CC, 0.4);
 scene.add(hemiLight);
 
 const sunLight = new THREE.DirectionalLight(0xFFF5E0, 1.3);
@@ -697,6 +697,98 @@ sunLight.shadow.bias = -0.0005;
 sunLight.shadow.normalBias = 0.02;
 scene.add(sunLight);
 scene.add(sunLight.target);
+
+// Fill light from opposite side for depth
+const fillLight = new THREE.DirectionalLight(0xA0C0E0, 0.3);
+fillLight.position.set(-40, 30, 20);
+scene.add(fillLight);
+
+// Gentle warm backlight / rim light
+const rimLight = new THREE.DirectionalLight(0xFFE8D0, 0.15);
+rimLight.position.set(0, 40, -80);
+scene.add(rimLight);
+
+// ============================================================
+// SKY DOME
+// ============================================================
+(function createSkyDome(){
+  const skyGeo = new THREE.SphereGeometry(380, 32, 20, 0, Math.PI*2, 0, Math.PI*0.5);
+  const skyCanvas = document.createElement('canvas');
+  skyCanvas.width = 4; skyCanvas.height = 512;
+  const ctx = skyCanvas.getContext('2d');
+  const grad = ctx.createLinearGradient(0, 0, 0, 512);
+  grad.addColorStop(0, '#1a3a6e');     // dark zenith
+  grad.addColorStop(0.15, '#2a5a9e');  // upper sky
+  grad.addColorStop(0.35, '#4a88cc');  // mid sky
+  grad.addColorStop(0.55, '#6eaadd');  // lower sky
+  grad.addColorStop(0.75, '#9cc4e8');  // pale horizon
+  grad.addColorStop(0.88, '#c0d8ec');  // misty horizon
+  grad.addColorStop(0.95, '#d8e4ee');  // fog blend
+  grad.addColorStop(1.0,  '#e0e8f0');  // ground blend
+  ctx.fillStyle = grad; ctx.fillRect(0, 0, 4, 512);
+  const skyTex = new THREE.CanvasTexture(skyCanvas);
+  const skyMat = new THREE.MeshBasicMaterial({map:skyTex, side:THREE.BackSide, fog:false, depthWrite:false});
+  const skyDome = new THREE.Mesh(skyGeo, skyMat);
+  skyDome.position.set(0, 30, TERRAIN_L*0.5);
+  skyDome.renderOrder = -1;
+  scene.add(skyDome);
+
+  // Sun glow
+  const sunGlowGeo = new THREE.SphereGeometry(8, 16, 16);
+  const sunGlowMat = new THREE.MeshBasicMaterial({color:0xFFF8E0, transparent:true, opacity:0.6, fog:false});
+  const sunGlow = new THREE.Mesh(sunGlowGeo, sunGlowMat);
+  const sunDir = sunLight.position.clone().normalize().multiplyScalar(350);
+  sunGlow.position.copy(sunDir).add(new THREE.Vector3(0,30,TERRAIN_L*0.5));
+  scene.add(sunGlow);
+  // Larger halo
+  const haloGeo = new THREE.SphereGeometry(20, 16, 16);
+  const haloMat = new THREE.MeshBasicMaterial({color:0xFFF8E8, transparent:true, opacity:0.12, fog:false});
+  const halo = new THREE.Mesh(haloGeo, haloMat);
+  halo.position.copy(sunGlow.position);
+  scene.add(halo);
+})();
+
+// ============================================================
+// MOUNTAIN BACKDROP
+// ============================================================
+(function createMountains(){
+  // Generate a ring of mountain peaks around the terrain at distance
+  const mountainMat = new THREE.MeshLambertMaterial({color:0x8090A0, fog:true});
+
+  const configs = [
+    // Behind (far end of slope)
+    {x:0, z:TERRAIN_L+80, h:90, w:180, peaks:7},
+    {x:-100, z:TERRAIN_L+60, h:70, w:120, peaks:5},
+    {x:100, z:TERRAIN_L+60, h:75, w:130, peaks:5},
+    // Left side
+    {x:-120, z:TERRAIN_L*0.3, h:55, w:100, peaks:4},
+    {x:-140, z:TERRAIN_L*0.6, h:65, w:110, peaks:4},
+    // Right side
+    {x:120, z:TERRAIN_L*0.3, h:55, w:100, peaks:4},
+    {x:140, z:TERRAIN_L*0.6, h:60, w:110, peaks:4},
+    // Far background
+    {x:-60, z:TERRAIN_L+120, h:100, w:200, peaks:8},
+    {x:60, z:TERRAIN_L+120, h:95, w:190, peaks:7},
+  ];
+
+  configs.forEach(cfg => {
+    for(let p = 0; p < cfg.peaks; p++){
+      const px = cfg.x + (p - cfg.peaks/2) * (cfg.w / cfg.peaks) + randRange(-10, 10);
+      const ph = cfg.h * randRange(0.5, 1.0);
+      const pw = randRange(15, 35);
+      // Rock body
+      const geo = new THREE.ConeGeometry(pw, ph, 5 + Math.floor(Math.random()*3));
+      const m = new THREE.Mesh(geo, mountainMat);
+      const baseH = baseTerrainHeight(clamp(px,-TERRAIN_W/2,TERRAIN_W/2), clamp(cfg.z,0,TERRAIN_L)) || 30;
+      m.position.set(px, baseH + ph * 0.35, cfg.z + randRange(-15,15));
+      m.rotation.y = Math.random() * Math.PI * 2;
+      // Slight random lean for variety
+      m.rotation.x = randRange(-0.05, 0.05);
+      m.rotation.z = randRange(-0.05, 0.05);
+      scene.add(m);
+    }
+  });
+})();
 
 window.addEventListener('resize', ()=>{
   camera.aspect = window.innerWidth/window.innerHeight;
@@ -1023,6 +1115,81 @@ function checkGroundRailSnap(){
 // ============================================================
 let terrainMesh = null;
 
+// Procedural snow texture
+function createSnowTexture(){
+  const sz = 512;
+  const c = document.createElement('canvas');
+  c.width = sz; c.height = sz;
+  const ctx = c.getContext('2d');
+  // Base: off-white with very slight blue tint
+  ctx.fillStyle = '#e8ecf2';
+  ctx.fillRect(0,0,sz,sz);
+  // Layered noise for snow grain
+  for(let pass=0; pass<3; pass++){
+    const grainSize = [2, 4, 8][pass];
+    const alpha = [0.08, 0.06, 0.04][pass];
+    for(let y=0; y<sz; y+=grainSize){
+      for(let x=0; x<sz; x+=grainSize){
+        const v = Math.random();
+        const bright = Math.floor(200 + v * 55);
+        ctx.fillStyle = `rgba(${bright},${bright+2},${bright+5},${alpha})`;
+        ctx.fillRect(x, y, grainSize, grainSize);
+      }
+    }
+  }
+  // Subtle sparkle spots (icy crystals)
+  for(let i=0; i<300; i++){
+    const sx = Math.random()*sz, sy = Math.random()*sz;
+    const r = Math.random() * 2 + 0.5;
+    ctx.fillStyle = `rgba(255,255,255,${0.15+Math.random()*0.3})`;
+    ctx.beginPath(); ctx.arc(sx,sy,r,0,Math.PI*2); ctx.fill();
+  }
+  // Wind/drift lines
+  ctx.strokeStyle = 'rgba(210,218,228,0.12)';
+  ctx.lineWidth = 1;
+  for(let i=0; i<40; i++){
+    const sy = Math.random()*sz;
+    ctx.beginPath();
+    ctx.moveTo(0, sy);
+    ctx.bezierCurveTo(sz*0.3, sy+randRange(-8,8), sz*0.7, sy+randRange(-8,8), sz, sy+randRange(-15,15));
+    ctx.stroke();
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(12, 65); // tile over terrain
+  return tex;
+}
+
+// Normal/bump map from snow texture
+function createSnowBumpMap(){
+  const sz = 256;
+  const c = document.createElement('canvas');
+  c.width = sz; c.height = sz;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#808080';
+  ctx.fillRect(0,0,sz,sz);
+  for(let pass=0; pass<2; pass++){
+    const gs = [3, 6][pass];
+    const alpha = [0.15, 0.1][pass];
+    for(let y=0; y<sz; y+=gs){
+      for(let x=0; x<sz; x+=gs){
+        const v = Math.floor(Math.random()*40+108);
+        ctx.fillStyle = `rgba(${v},${v},${v},${alpha})`;
+        ctx.fillRect(x,y,gs,gs);
+      }
+    }
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(12, 65);
+  return tex;
+}
+
+const snowTexture = createSnowTexture();
+const snowBumpMap = createSnowBumpMap();
+
 function createTerrainMesh(){
   if(terrainMesh){ scene.remove(terrainMesh); terrainMesh.geometry.dispose(); }
   const geo = new THREE.PlaneGeometry(TERRAIN_W, TERRAIN_L, TERRAIN_SEG_W, TERRAIN_SEG_L);
@@ -1075,9 +1242,12 @@ function createTerrainMesh(){
   // For half pipe: use Phong material with reduced specular to avoid bright spots
   let mat;
   if(isHP){
-    mat = new THREE.MeshPhongMaterial({vertexColors:true, color:0xE8E8F0, specular:0x222233, shininess:5});
+    mat = new THREE.MeshPhongMaterial({vertexColors:true, color:0xE8E8F0, specular:0x334455, shininess:12,
+      map:snowTexture, bumpMap:snowBumpMap, bumpScale:0.15});
   } else {
-    mat = new THREE.MeshLambertMaterial({vertexColors:true, color:0xF0F0FF});
+    mat = new THREE.MeshStandardMaterial({vertexColors:true, color:0xF0F0FF,
+      map:snowTexture, bumpMap:snowBumpMap, bumpScale:0.2,
+      roughness:0.82, metalness:0.02});
   }
   terrainMesh = new THREE.Mesh(geo, mat);
   terrainMesh.receiveShadow = true;
@@ -1198,7 +1368,11 @@ function createJumpMesh(j){
     p[i+1]=h+0.05;
   }
   geo.computeVertexNormals();
-  const mat = new THREE.MeshLambertMaterial({color:0xE8E8F8});
+  // Snow-covered jump with texture
+  const jumpSnowTex = snowTexture.clone();
+  jumpSnowTex.repeat.set(1, 2);
+  jumpSnowTex.needsUpdate = true;
+  const mat = new THREE.MeshStandardMaterial({color:0xE8ECF4, map:jumpSnowTex, roughness:0.75, metalness:0.02});
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.set(j.x, baseTerrainHeight(j.x,j.z)-0.05, j.z);
   mesh.rotation.y = j.rot||0;
@@ -1206,6 +1380,46 @@ function createJumpMesh(j){
   mesh.userData = {type:'jump', data:j};
   scene.add(mesh);
   featureMeshes.push(mesh);
+
+  // Flags at left and right corners of the jump lip
+  const jw = j.w || 8, jlen = j.len || 16, jh = j.h || 3;
+  // Compute surface height at any local (x,z) using same formula as geometry
+  function jumpSurfaceH(lx, lz){
+    const t = (lz + jlen/2) / jlen;
+    let h = 0;
+    if(t < 0.38) h = jh * smoothstep(0, 0.38, t);
+    else if(t < 0.62) h = jh;
+    else h = jh * (1 - smoothstep(0.62, 1, t));
+    const latT = Math.abs(lx) / (jw * 0.5);
+    if(latT > 0.7) h *= 1 - (latT - 0.7) / 0.3;
+    return h + 0.05;
+  }
+  // Place flags at the corners of the flat top (t≈0.38 ramp lip & t≈0.62 takeoff lip)
+  const flagPoleH = Math.max(1.0, jh * 0.55);
+  const poleMat = new THREE.MeshLambertMaterial({color:0x444444});
+  const flagMat = new THREE.MeshLambertMaterial({color:0xFF2222, side:THREE.DoubleSide});
+  const flagSize = Math.max(0.3, jh * 0.18);
+  // Lip positions: takeoff lip only (t=0.62)
+  const lipLocalZ = 0.62 * jlen - jlen/2;
+  for(let side = -1; side <= 1; side += 2){
+      const lx = side * jw * 0.35;
+      const surfH = jumpSurfaceH(lx, lipLocalZ);
+      const poleGeo = new THREE.CylinderGeometry(0.03, 0.04, flagPoleH, 5);
+      const pole = new THREE.Mesh(poleGeo, poleMat);
+      pole.position.set(lx, surfH + flagPoleH * 0.5, lipLocalZ);
+      pole.castShadow = true;
+      mesh.add(pole);
+      const flagShape = new THREE.Shape();
+      flagShape.moveTo(0, 0);
+      flagShape.lineTo(side * flagSize * 1.5, flagSize * 0.35);
+      flagShape.lineTo(0, flagSize);
+      flagShape.lineTo(0, 0);
+      const flagGeo = new THREE.ShapeGeometry(flagShape);
+      const flag = new THREE.Mesh(flagGeo, flagMat);
+      flag.position.set(lx, surfH + flagPoleH * 0.82, lipLocalZ + 0.03);
+      mesh.add(flag);
+  }
+
   return mesh;
 }
 
@@ -1366,7 +1580,7 @@ function createBoxMesh(b){
     }
   } else {
     const bodyGeo = new THREE.BoxGeometry(w, h, l);
-    const bodyMat = new THREE.MeshLambertMaterial({color:b.color||0xFF8800});
+    const bodyMat = new THREE.MeshStandardMaterial({color:b.color||0xFF8800, roughness:0.5, metalness:0.1});
     const body = new THREE.Mesh(bodyGeo, bodyMat);
     body.position.y = h/2;
     body.castShadow=true; body.receiveShadow=true;
@@ -1388,9 +1602,10 @@ function createBoxMesh(b){
 }
 
 // --- TREE MESH ---
-const treeTrunkMat = new THREE.MeshLambertMaterial({color:0x5C3A1E});
-const treeLeafMat = new THREE.MeshLambertMaterial({color:0x2D6A27});
-const treeSnowMat = new THREE.MeshLambertMaterial({color:0xEEEEFF});
+const treeTrunkMat = new THREE.MeshStandardMaterial({color:0x5C3A1E, roughness:0.9, metalness:0.0});
+const treeLeafMat = new THREE.MeshStandardMaterial({color:0x1E5A1A, roughness:0.75, metalness:0.0});
+const treeLeafDarkMat = new THREE.MeshStandardMaterial({color:0x164514, roughness:0.8, metalness:0.0});
+const treeSnowMat = new THREE.MeshStandardMaterial({color:0xE4E8F0, roughness:0.6, metalness:0.02});
 
 // --- PARK BENCH MESH ---
 function createBenchMesh(b){
@@ -1464,12 +1679,21 @@ function createTreeMesh(t){
   const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.12*s,0.18*s,2*s,6), treeTrunkMat);
   trunk.position.y = s; trunk.castShadow=true;
   group.add(trunk);
+  // Multiple foliage tiers with alternating colors
   for(let i=0;i<3;i++){
     const r = (1.6-i*0.4)*s;
-    const cone = new THREE.Mesh(new THREE.ConeGeometry(r, 2.2*s, 7), treeLeafMat);
+    const leafMat = i % 2 === 0 ? treeLeafMat : treeLeafDarkMat;
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(r, 2.2*s, 7), leafMat);
     cone.position.y = 2.5*s + i*1.4*s;
     cone.castShadow=true;
     group.add(cone);
+    // Snow layer on each tier
+    if(i < 2){
+      const snowR = r * 0.7;
+      const snowCone = new THREE.Mesh(new THREE.ConeGeometry(snowR, 0.4*s, 7), treeSnowMat);
+      snowCone.position.y = 2.5*s + i*1.4*s + 1.0*s;
+      group.add(snowCone);
+    }
   }
   const snow = new THREE.Mesh(new THREE.ConeGeometry(0.9*s, 1.2*s, 7), treeSnowMat);
   snow.position.y = 2.5*s + 2*1.4*s + 0.8*s;
@@ -1675,6 +1899,20 @@ const BUILTIN_LEVELS = {
     const z = randRange(10, 460);
     st.trees.push({x, z, s:randRange(0.5,1.1)});
   }
+  // Dense tree lines on edges for all park levels
+  ["Main Park", "Street Spot", "Half Pipe"].forEach(name => {
+    const lv = BUILTIN_LEVELS[name];
+    // Left treeline
+    for(let z=5; z<TERRAIN_L-20; z+=randRange(6,14)){
+      const x = -randRange(35, 55);
+      lv.trees.push({x, z, s:randRange(0.7,1.5)});
+    }
+    // Right treeline
+    for(let z=5; z<TERRAIN_L-20; z+=randRange(6,14)){
+      const x = randRange(35, 55);
+      lv.trees.push({x, z, s:randRange(0.7,1.5)});
+    }
+  });
 })();
 
 function loadLevel(name, data){
@@ -1918,31 +2156,44 @@ function createSkier(){
   rArm.castShadow = true;
   g.add(rArm);
 
-  // ---- LEGS (ski pants with detail) ----
+  // ---- LEGS (ski pants with detail, proper knee joint hierarchy) ----
   function makeLeg(side){
     const leg = new THREE.Group();
-    // Upper thigh
+    // Thigh group - pivots at hip joint (leg group origin + 0.23 offset)
+    const thighGroup = new THREE.Group();
+    thighGroup.position.y = 0.23; // hip pivot offset within leg group
     const thighGeo = new THREE.CylinderGeometry(0.07, 0.075, 0.26, 6);
-    const thigh = new THREE.Mesh(thighGeo, pantsMat);
-    thigh.position.y = 0.1;
-    thigh.castShadow = true;
-    leg.add(thigh);
-    // Lower leg / shin
+    const thighMesh = new THREE.Mesh(thighGeo, pantsMat);
+    thighMesh.position.y = -0.13; // center of thigh below hip pivot
+    thighMesh.castShadow = true;
+    thighGroup.add(thighMesh);
+    // Thigh seam stripe
+    const thighSeam = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.24, 0.01), pantsSeamMat);
+    thighSeam.position.set(side * 0.065, -0.13, 0);
+    thighGroup.add(thighSeam);
+    // Shin group - pivots at knee joint (bottom of thigh)
+    const shinGroup = new THREE.Group();
+    shinGroup.position.y = -0.26; // knee joint = bottom of thigh
     const shinGeo = new THREE.CylinderGeometry(0.06, 0.065, 0.24, 6);
-    const shin = new THREE.Mesh(shinGeo, pantsMat);
-    shin.position.y = -0.1;
-    shin.castShadow = true;
-    leg.add(shin);
-    // Knee pad area
+    const shinMesh = new THREE.Mesh(shinGeo, pantsMat);
+    shinMesh.position.y = -0.12; // center of shin below knee pivot
+    shinMesh.castShadow = true;
+    shinGroup.add(shinMesh);
+    // Knee pad at knee joint
     const kneeGeo = new THREE.SphereGeometry(0.06, 6, 4);
-    const knee = new THREE.Mesh(kneeGeo, pantsSeamMat);
-    knee.scale.set(1, 0.7, 1.1);
-    knee.position.set(0, 0, 0.03);
-    leg.add(knee);
-    // Side seam stripe
-    const seam = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.44, 0.01), pantsSeamMat);
-    seam.position.set(side * 0.065, 0, 0);
-    leg.add(seam);
+    const kneePad = new THREE.Mesh(kneeGeo, pantsSeamMat);
+    kneePad.scale.set(1, 0.7, 1.1);
+    kneePad.position.set(0, 0.02, 0.04);
+    shinGroup.add(kneePad);
+    // Shin seam stripe
+    const shinSeam = new THREE.Mesh(new THREE.BoxGeometry(0.008, 0.20, 0.01), pantsSeamMat);
+    shinSeam.position.set(side * 0.065, -0.12, 0);
+    shinGroup.add(shinSeam);
+    thighGroup.add(shinGroup);
+    leg.add(thighGroup);
+    // Store refs for animation
+    leg.thighGroup = thighGroup;
+    leg.shinGroup = shinGroup;
     return leg;
   }
   const lLeg = makeLeg(-1);
@@ -2085,6 +2336,8 @@ function createSkier(){
   skierParts.torso=torso; skierParts.head=head; skierParts.helmet=helmet;
   skierParts.lArm=lArm; skierParts.rArm=rArm;
   skierParts.lLeg=lLeg; skierParts.rLeg=rLeg;
+  skierParts.lThigh=lLeg.thighGroup; skierParts.lShin=lLeg.shinGroup;
+  skierParts.rThigh=rLeg.thighGroup; skierParts.rShin=rLeg.shinGroup;
   skierParts.lBoot=lBoot; skierParts.rBoot=rBoot;
   skierParts.lSki=lSki; skierParts.rSki=rSki;
   skierParts.lTip=lTip; skierParts.rTip=rTip;
@@ -3490,8 +3743,10 @@ function updateSkierModel(dt){
     skierParts.goggles.position.set(0, 1.28, 0.12); skierParts.goggles.rotation.set(0,0,0);
     skierParts.lArm.position.set(-0.24, 0.90, 0.04); skierParts.lArm.rotation.set(0,0,0);
     skierParts.rArm.position.set(0.24, 0.90, 0.04); skierParts.rArm.rotation.set(0,0,0);
-    skierParts.lLeg.position.set(-0.11, 0.34, 0); skierParts.lLeg.rotation.set(0,0,0); skierParts.lLeg.scale.y=1;
-    skierParts.rLeg.position.set(0.11, 0.34, 0); skierParts.rLeg.rotation.set(0,0,0); skierParts.rLeg.scale.y=1;
+    skierParts.lLeg.position.set(-0.11, 0.34, 0); skierParts.lLeg.rotation.set(0,0,0);
+    skierParts.rLeg.position.set(0.11, 0.34, 0); skierParts.rLeg.rotation.set(0,0,0);
+    if(skierParts.lThigh){ skierParts.lThigh.rotation.set(0,0,0); skierParts.lShin.rotation.set(0,0,0); }
+    if(skierParts.rThigh){ skierParts.rThigh.rotation.set(0,0,0); skierParts.rShin.rotation.set(0,0,0); }
     skierParts.lBoot.position.set(-0.11, 0.08, 0.04); skierParts.lBoot.rotation.set(0,0,0);
     skierParts.rBoot.position.set(0.11, 0.08, 0.04); skierParts.rBoot.rotation.set(0,0,0);
     skierParts.lSki.position.set(-0.11, 0.012, 0.1); skierParts.lSki.rotation.set(0,0,0);
@@ -3531,27 +3786,59 @@ function updateSkierModel(dt){
     skier.rotation.x = sk.totalFlip;
   }
 
-  // ---- LOWER BODY: legs, boots, skis (terrain IK proxy) ----
+  // ---- LOWER BODY: legs, boots, skis (proper knee joint bending) ----
   const compressionY = sk.legCompression * 0.25 + a.impactAbsorb * 0.15;
+  const THIGH_LEN = 0.26; // thigh chain length (hip pivot to knee pivot)
+  const SHIN_LEN = 0.24;  // shin chain length (knee pivot to ankle)
+  const HIP_PIVOT_Y = 0.23; // thighGroup offset within leg group
+  const HIP_FLEX_MULT = 0.65; // thigh forward tilt per unit kneeBend
+  const KNEE_FLEX_MULT = 1.1; // shin recovery angle per unit kneeBend
+
+  function computeLegFK(kneeBend){
+    const hipFlex = -kneeBend * HIP_FLEX_MULT; // negative = forward tilt
+    const kneeFlex = kneeBend * KNEE_FLEX_MULT;  // positive = shin bends back from thigh
+    // Ankle position relative to hip pivot in leg-local YZ plane
+    const cosH = Math.cos(hipFlex), sinH = Math.sin(hipFlex);
+    const totalAngle = hipFlex + kneeFlex;
+    const cosT = Math.cos(totalAngle), sinT = Math.sin(totalAngle);
+    const ankleRelY = -THIGH_LEN * cosH - SHIN_LEN * cosT;
+    const ankleRelZ = -THIGH_LEN * sinH - SHIN_LEN * sinT;
+    return { hipFlex, kneeFlex, ankleRelY, ankleRelZ };
+  }
 
   // Left leg
   const lKnee = a.kneeBendL;
+  const lFK = computeLegFK(lKnee);
   skierParts.lLeg.position.set(-0.11 + a.hipOffset.x, 0.34 - compressionY, 0);
-  skierParts.lLeg.scale.y = 1 - lKnee * 0.4;
   skierParts.lLeg.rotation.set(0, 0, 0);
-  skierParts.lBoot.position.set(-0.11, 0.08 - compressionY * 0.3, 0.04);
-  skierParts.lBoot.rotation.x = a.ankleFlexL;
+  if(skierParts.lThigh){
+    skierParts.lThigh.rotation.x = lFK.hipFlex;
+    skierParts.lShin.rotation.x = lFK.kneeFlex;
+  }
+  // Boot position from FK (ankle position in skier space)
+  const lHipY = 0.34 - compressionY + HIP_PIVOT_Y;
+  const lBootY = lHipY + lFK.ankleRelY - 0.04; // -0.04 offset to boot center
+  const lBootZ = lFK.ankleRelZ + 0.04;
+  skierParts.lBoot.position.set(-0.11, Math.max(lBootY, 0.02), lBootZ);
+  skierParts.lBoot.rotation.x = a.ankleFlexL - (lFK.hipFlex + lFK.kneeFlex) * 0.3;
   skierParts.lSki.position.set(-0.11, 0.012, 0.1);
   skierParts.lSki.rotation.set(a.skiPitchL * 0.3, 0, a.skiRollL);
   skierParts.lTip.rotation.set(-0.3 + a.skiPitchL * 0.2, 0, a.skiRollL);
 
   // Right leg
   const rKnee = a.kneeBendR;
+  const rFK = computeLegFK(rKnee);
   skierParts.rLeg.position.set(0.11 + a.hipOffset.x, 0.34 - compressionY, 0);
-  skierParts.rLeg.scale.y = 1 - rKnee * 0.4;
   skierParts.rLeg.rotation.set(0, 0, 0);
-  skierParts.rBoot.position.set(0.11, 0.08 - compressionY * 0.3, 0.04);
-  skierParts.rBoot.rotation.x = a.ankleFlexR;
+  if(skierParts.rThigh){
+    skierParts.rThigh.rotation.x = rFK.hipFlex;
+    skierParts.rShin.rotation.x = rFK.kneeFlex;
+  }
+  const rHipY = 0.34 - compressionY + HIP_PIVOT_Y;
+  const rBootY = rHipY + rFK.ankleRelY - 0.04;
+  const rBootZ = rFK.ankleRelZ + 0.04;
+  skierParts.rBoot.position.set(0.11, Math.max(rBootY, 0.02), rBootZ);
+  skierParts.rBoot.rotation.x = a.ankleFlexR - (rFK.hipFlex + rFK.kneeFlex) * 0.3;
   skierParts.rSki.position.set(0.11, 0.012, 0.1);
   skierParts.rSki.rotation.set(a.skiPitchR * 0.3, 0, a.skiRollR);
   skierParts.rTip.rotation.set(-0.3 + a.skiPitchR * 0.2, 0, a.skiRollR);
