@@ -457,10 +457,10 @@ renderer.setSize(window.innerWidth, window.innerHeight);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-renderer.setClearColor(0x87CEEB);
+renderer.setClearColor(0x7ABEDB);
 
 const scene = new THREE.Scene();
-scene.fog = new THREE.Fog(0xC8D8E8, 80, 500);
+scene.fog = new THREE.Fog(0xA8B8C8, 80, 500);
 
 const camera = new THREE.PerspectiveCamera(62, window.innerWidth/window.innerHeight, 0.1, 800);
 camera.position.set(0, 65, -5);
@@ -676,14 +676,14 @@ function setupCustomizeInputs(){
   });
 }
 
-const ambientLight = new THREE.AmbientLight(0x8899BB, 0.5);
+const ambientLight = new THREE.AmbientLight(0x667799, 0.35);
 scene.add(ambientLight);
 
-const hemiLight = new THREE.HemisphereLight(0x88BBEE, 0xDDD8CC, 0.4);
+const hemiLight = new THREE.HemisphereLight(0x6699CC, 0xBBB8AA, 0.3);
 scene.add(hemiLight);
 
-const sunLight = new THREE.DirectionalLight(0xFFF5E0, 1.3);
-sunLight.position.set(50, 120, -30);
+const sunLight = new THREE.DirectionalLight(0xFFF5E0, 1.6);
+sunLight.position.set(50, 100, -30);
 sunLight.castShadow = true;
 sunLight.shadow.mapSize.width = 4096;
 sunLight.shadow.mapSize.height = 4096;
@@ -815,7 +815,6 @@ function baseTerrainHeight(x, z){
   h += Math.sin(z*0.038+x*0.025)*0.7;
   h += Math.cos(z*0.007+0.5)*Math.sin(x*0.009)*1.5;
   if(z < 15) h = lerp(62, h, smoothstep(0,15,z));
-  if(z > TERRAIN_L - 30) h = Math.max(h, 2);
 
   // Half-pipe terrain override
   if(currentLevel && currentLevel.halfpipe){
@@ -878,9 +877,43 @@ function jumpContrib(x, z, j){
   return Math.max(0,h);
 }
 
+function rollerContrib(x, z, r){
+  const ca = Math.cos(-(r.rot||0)), sa = Math.sin(-(r.rot||0));
+  const dx = x-r.x, dz = z-r.z;
+  const lx = dx*ca - dz*sa, lz = dx*sa + dz*ca;
+  const rW = r.w||8, rLen = r.len||10, rH = r.h||1.5;
+  const hw = rW*0.5, hl = rLen*0.5;
+  if(Math.abs(lx)>hw || Math.abs(lz)>hl) return 0;
+  const tZ = lz / hl;
+  const tX = lx / hw;
+  const hZ = Math.exp(-tZ*tZ*3);
+  const hX = Math.exp(-tX*tX*2);
+  return Math.max(0, rH * hZ * hX);
+}
+
+function spineContrib(x, z, sp){
+  const ca = Math.cos(-(sp.rot||0)), sa = Math.sin(-(sp.rot||0));
+  const dx = x-sp.x, dz = z-sp.z;
+  const lx = dx*ca - dz*sa, lz = dx*sa + dz*ca;
+  const spW = sp.w||10, spLen = sp.len||20, spH = sp.h||3.5;
+  const hw = spW*0.5, hl = spLen*0.5;
+  if(Math.abs(lx)>hw || lz < -hl || lz > hl) return 0;
+  const t = (lz+hl)/(hl*2);
+  let h;
+  if(t < 0.5) h = spH * smoothstep(0, 0.45, t);
+  else h = spH * (1 - smoothstep(0.55, 1, t));
+  const latT = Math.abs(lx)/hw;
+  if(latT > 0.7) h *= 1-(latT-0.7)/0.3;
+  return Math.max(0, h);
+}
+
+let levelRollers = [], levelSpines = [];
+
 function getHeight(x,z){
   let h = baseTerrainHeight(x,z);
   for(let i=0;i<levelJumps.length;i++) h += jumpContrib(x,z,levelJumps[i]);
+  for(let i=0;i<levelRollers.length;i++) h += rollerContrib(x,z,levelRollers[i]);
+  for(let i=0;i<levelSpines.length;i++) h += spineContrib(x,z,levelSpines[i]);
   return h;
 }
 
@@ -969,6 +1002,38 @@ function getEffectiveHeight(x, z){
       h = Math.max(h, lerp(getHeight(x,z), surfH, factor));
     }
   }
+  // Stair surfaces act as elevated terrain (solid steps)
+  const stairs = currentLevel.stairData || [];
+  for(let i = 0; i < stairs.length; i++){
+    const s = stairs[i];
+    const rot = s.rot || 0;
+    const ca = Math.cos(-rot), sa = Math.sin(-rot);
+    const dx = x - s.x, dz = z - s.z;
+    const lx = dx*ca - dz*sa, lz = dx*sa + dz*ca;
+    const sW = s.w||6, sLen = s.len||8, sH = s.h||1.5;
+    const steps = s.steps||5;
+    const hw = sW*0.5, hl = sLen*0.5;
+    const margin = 0.4;
+    // Include the top platform (extends 2 units behind the stairs)
+    if(Math.abs(lx) <= hw + margin && lz >= -hl - 2 - margin && lz <= hl + margin){
+      let surfH;
+      if(lz < -hl){ // on top platform
+        surfH = getHeight(s.x, s.z) + sH;
+      } else {
+        // On steps: height depends on which step we're on
+        const t = clamp((lz + hl) / sLen, 0, 1);
+        const stepIdx = Math.floor(t * steps);
+        surfH = getHeight(s.x, s.z) + sH - stepIdx * (sH / steps);
+      }
+      let factor = 1;
+      const overW = Math.abs(lx) - hw;
+      if(overW > 0) factor *= 1 - overW / margin;
+      if(lz < -hl - 2) factor *= clamp(1 - (-hl - 2 - lz) / margin, 0, 1);
+      if(lz > hl) factor *= clamp(1 - (lz - hl) / margin, 0, 1);
+      factor = clamp(factor, 0, 1);
+      h = Math.max(h, lerp(getHeight(x,z), surfH, factor));
+    }
+  }
   return h;
 }
 
@@ -1013,6 +1078,32 @@ function isOnIcySurface(x, z){
     const perp = Math.abs(-toX*dirZ + toZ*dirX);
     const tubeW = r.w || 0.5;
     if(along >= 0 && along <= rLen && perp <= tubeW + 0.15) return true;
+  }
+  // Stairs (concrete surface = slightly icy)
+  const stairs = currentLevel.stairData || [];
+  for(let i = 0; i < stairs.length; i++){
+    const s = stairs[i];
+    const rot = s.rot || 0;
+    const ca = Math.cos(-rot), sa = Math.sin(-rot);
+    const dx = x - s.x, dz = z - s.z;
+    const lx = dx*ca - dz*sa, lz = dx*sa + dz*ca;
+    const hw = (s.w||6)*0.5, hl = (s.len||8)*0.5;
+    if(Math.abs(lx) <= hw + 0.1 && lz >= -hl - 2.1 && lz <= hl + 0.1) return true;
+  }
+  return false;
+}
+
+function isOnStairs(x, z){
+  if(!currentLevel) return false;
+  const stairs = currentLevel.stairData || [];
+  for(let i = 0; i < stairs.length; i++){
+    const s = stairs[i];
+    const rot = s.rot || 0;
+    const ca = Math.cos(-rot), sa = Math.sin(-rot);
+    const dx = x - s.x, dz = z - s.z;
+    const lx = dx*ca - dz*sa, lz = dx*sa + dz*ca;
+    const hw = (s.w||6)*0.5, hl = (s.len||8)*0.5;
+    if(Math.abs(lx) <= hw + 0.1 && lz >= -hl - 2.1 && lz <= hl + 0.1) return true;
   }
   return false;
 }
@@ -1121,8 +1212,8 @@ function createSnowTexture(){
   const c = document.createElement('canvas');
   c.width = sz; c.height = sz;
   const ctx = c.getContext('2d');
-  // Base: off-white with very slight blue tint
-  ctx.fillStyle = '#e8ecf2';
+  // Base: darker snow for better contrast
+  ctx.fillStyle = '#bcc4d0';
   ctx.fillRect(0,0,sz,sz);
   // Layered noise for snow grain
   for(let pass=0; pass<3; pass++){
@@ -1212,7 +1303,7 @@ function createTerrainMesh(){
     pos[i+1] = getHeight(x, z + TERRAIN_L/2);
     pos[i+2] = z + TERRAIN_L/2;
     const realZ = z + TERRAIN_L/2;
-    let b = 0.92 + Math.random()*0.08;
+    let b = 0.76 + Math.random()*0.08;
     
     // Half pipe: consistent wall coloring on both sides
     if(isHP && realZ >= hpZStart && realZ <= hpZEnd){
@@ -1220,17 +1311,17 @@ function createTerrainMesh(){
       if(dx > hpFlatW && dx <= hpFlatW + hpTransR + 1.5){
         // Wall area: use a consistent icy blue-gray that looks the same on both sides
         const wallT = clamp((dx - hpFlatW) / (hpTransR + 1.5), 0, 1);
-        const wallB = 0.78 - wallT * 0.12; // slightly darker up the wall
+        const wallB = 0.65 - wallT * 0.12; // darker up the wall
         colors[i] = wallB * 0.92;
         colors[i+1] = wallB * 0.94;
         colors[i+2] = wallB * 1.02;
         continue;
       } else if(dx <= hpFlatW){
         // Flat bottom: slightly different shade
-        b = 0.88 + Math.random() * 0.04;
+        b = 0.72 + Math.random() * 0.04;
       } else {
         // Outside lip/deck
-        b = 0.82 + Math.random() * 0.06;
+        b = 0.68 + Math.random() * 0.06;
       }
     }
     
@@ -1242,12 +1333,12 @@ function createTerrainMesh(){
   // For half pipe: use Phong material with reduced specular to avoid bright spots
   let mat;
   if(isHP){
-    mat = new THREE.MeshPhongMaterial({vertexColors:true, color:0xE8E8F0, specular:0x334455, shininess:12,
-      map:snowTexture, bumpMap:snowBumpMap, bumpScale:0.15});
+    mat = new THREE.MeshPhongMaterial({vertexColors:true, color:0xC8C8D8, specular:0x223344, shininess:10,
+      map:snowTexture, bumpMap:snowBumpMap, bumpScale:0.18});
   } else {
-    mat = new THREE.MeshStandardMaterial({vertexColors:true, color:0xF0F0FF,
-      map:snowTexture, bumpMap:snowBumpMap, bumpScale:0.2,
-      roughness:0.82, metalness:0.02});
+    mat = new THREE.MeshStandardMaterial({vertexColors:true, color:0xD0D0E0,
+      map:snowTexture, bumpMap:snowBumpMap, bumpScale:0.25,
+      roughness:0.78, metalness:0.02});
   }
   terrainMesh = new THREE.Mesh(geo, mat);
   terrainMesh.receiveShadow = true;
@@ -1406,7 +1497,8 @@ function createJumpMesh(j){
       const surfH = jumpSurfaceH(lx, lipLocalZ);
       const poleGeo = new THREE.CylinderGeometry(0.03, 0.04, flagPoleH, 5);
       const pole = new THREE.Mesh(poleGeo, poleMat);
-      pole.position.set(lx, surfH + flagPoleH * 0.5, lipLocalZ);
+      // Embed bottom 1/4 of pole into the jump surface
+      pole.position.set(lx, surfH + flagPoleH * 0.25, lipLocalZ);
       pole.castShadow = true;
       mesh.add(pole);
       const flagShape = new THREE.Shape();
@@ -1416,7 +1508,7 @@ function createJumpMesh(j){
       flagShape.lineTo(0, 0);
       const flagGeo = new THREE.ShapeGeometry(flagShape);
       const flag = new THREE.Mesh(flagGeo, flagMat);
-      flag.position.set(lx, surfH + flagPoleH * 0.82, lipLocalZ + 0.03);
+      flag.position.set(lx, surfH + flagPoleH * 0.57, lipLocalZ + 0.03);
       mesh.add(flag);
   }
 
@@ -1706,6 +1798,177 @@ function createTreeMesh(t){
   return group;
 }
 
+// --- STAIR SET MESH ---
+// A flat elevated ledge with steps down — great for drops and urban tricks
+function createStairsMesh(s){
+  const group = new THREE.Group();
+  const sW = s.w || 6;       // width
+  const sH = s.h || 1.5;     // total height drop
+  const steps = s.steps || 5; // number of steps
+  const sLen = s.len || 8;   // total length
+  const rot = s.rot || 0;
+  const stepH = sH / steps;
+  const stepD = sLen / steps;
+
+  const concreteMat = new THREE.MeshStandardMaterial({color:s.color||0x999999, roughness:0.85, metalness:0.02});
+  const edgeMat = new THREE.MeshStandardMaterial({color:0x777777, roughness:0.6, metalness:0.1});
+
+  // Top platform (flat landing before stairs)
+  const platGeo = new THREE.BoxGeometry(sW, sH, 2);
+  const plat = new THREE.Mesh(platGeo, concreteMat);
+  plat.position.set(0, sH / 2, -sLen / 2 - 1);
+  plat.castShadow = true; plat.receiveShadow = true;
+  group.add(plat);
+
+  // Steps
+  for(let i = 0; i < steps; i++){
+    const remainH = sH - i * stepH;
+    const geo = new THREE.BoxGeometry(sW, remainH, stepD);
+    const step = new THREE.Mesh(geo, concreteMat);
+    step.position.set(0, remainH / 2, -sLen / 2 + (i + 0.5) * stepD);
+    step.castShadow = true; step.receiveShadow = true;
+    group.add(step);
+
+    // Step edge highlight
+    const edgeGeo = new THREE.BoxGeometry(sW + 0.02, 0.03, 0.06);
+    const edge = new THREE.Mesh(edgeGeo, edgeMat);
+    edge.position.set(0, remainH + 0.015, -sLen / 2 + i * stepD);
+    group.add(edge);
+  }
+
+  // Handrail on one side
+  const railH = sH + 0.8;
+  const railLen = sLen + 3;
+  const railAngle = Math.atan2(sH, sLen);
+  const railMesh = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.04, 0.04, railLen * 1.05, 6),
+    new THREE.MeshStandardMaterial({color:0x555555, metalness:0.6, roughness:0.3})
+  );
+  railMesh.rotation.x = railAngle;
+  railMesh.position.set(sW / 2 + 0.1, railH * 0.55, 0);
+  railMesh.castShadow = true;
+  group.add(railMesh);
+
+  // Rail support posts
+  for(let i = 0; i <= 2; i++){
+    const t = i / 2;
+    const postH = railH - t * sH * 0.8;
+    const postGeo = new THREE.CylinderGeometry(0.03, 0.035, postH, 5);
+    const post = new THREE.Mesh(postGeo, new THREE.MeshStandardMaterial({color:0x555555, metalness:0.5, roughness:0.4}));
+    post.position.set(sW / 2 + 0.1, postH / 2, -sLen / 2 - 1 + t * (sLen + 2));
+    post.castShadow = true;
+    group.add(post);
+  }
+
+  const gh = getHeight(s.x, s.z);
+  group.position.set(s.x, gh, s.z);
+  group.rotation.y = rot;
+  group.userData = {type:'stairs', data:s};
+  scene.add(group);
+  featureMeshes.push(group);
+  return group;
+}
+
+// --- ROLLER MESH ---
+// A smooth mound/bump on the terrain for natural hits
+function createRollerMesh(r){
+  const rW = r.w || 8;
+  const rLen = r.len || 10;
+  const rH = r.h || 1.5;
+  const segs = 16;
+
+  const geo = new THREE.PlaneGeometry(rW, rLen, 8, segs);
+  geo.rotateX(-Math.PI / 2);
+  const p = geo.attributes.position.array;
+  for(let i = 0; i < p.length; i += 3){
+    const lx = p[i], lz = p[i + 2];
+    // Smooth gaussian bump
+    const tZ = lz / (rLen * 0.5); // -1 to 1
+    const tX = lx / (rW * 0.5);   // -1 to 1
+    const hZ = Math.exp(-tZ * tZ * 3);
+    const hX = Math.exp(-tX * tX * 2);
+    p[i + 1] = rH * hZ * hX + 0.05;
+  }
+  geo.computeVertexNormals();
+  const rollerSnowTex = snowTexture.clone();
+  rollerSnowTex.repeat.set(1, 1.5);
+  rollerSnowTex.needsUpdate = true;
+  const mat = new THREE.MeshStandardMaterial({color:0xE4E8F0, map:rollerSnowTex, roughness:0.78, metalness:0.02});
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(r.x, baseTerrainHeight(r.x, r.z) - 0.05, r.z);
+  mesh.rotation.y = r.rot || 0;
+  mesh.castShadow = true; mesh.receiveShadow = true;
+  mesh.userData = {type:'roller', data:r};
+  scene.add(mesh);
+  featureMeshes.push(mesh);
+  return mesh;
+}
+
+// --- SPINE JUMP MESH ---
+// Two ramps back-to-back sharing a peak — ride up one side, air, land on the other
+function createSpineMesh(sp){
+  const spW = sp.w || 10;
+  const spLen = sp.len || 20;
+  const spH = sp.h || 3.5;
+  const segs = 24;
+
+  const geo = new THREE.PlaneGeometry(spW, spLen, 8, segs);
+  geo.rotateX(-Math.PI / 2);
+  const p = geo.attributes.position.array;
+  for(let i = 0; i < p.length; i += 3){
+    const lx = p[i], lz = p[i + 2];
+    const t = (lz + spLen / 2) / spLen; // 0 to 1
+    // Spine profile: ramp up to center peak then back down
+    let h;
+    if(t < 0.5){
+      h = spH * smoothstep(0, 0.45, t);
+    } else {
+      h = spH * (1 - smoothstep(0.55, 1, t));
+    }
+    // Lateral rolloff at edges
+    const latT = Math.abs(lx) / (spW * 0.5);
+    if(latT > 0.7) h *= 1 - (latT - 0.7) / 0.3;
+    p[i + 1] = h + 0.05;
+  }
+  geo.computeVertexNormals();
+  const spineSnowTex = snowTexture.clone();
+  spineSnowTex.repeat.set(1, 2.5);
+  spineSnowTex.needsUpdate = true;
+  const mat = new THREE.MeshStandardMaterial({color:0xE4E8F0, map:spineSnowTex, roughness:0.75, metalness:0.02});
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.position.set(sp.x, baseTerrainHeight(sp.x, sp.z) - 0.05, sp.z);
+  mesh.rotation.y = sp.rot || 0;
+  mesh.castShadow = true; mesh.receiveShadow = true;
+  mesh.userData = {type:'spine', data:sp};
+  scene.add(mesh);
+  featureMeshes.push(mesh);
+
+  // Flags at the spine peak edges
+  const peakZ = 0; // center of spine
+  const flagPoleH = Math.max(0.8, spH * 0.4);
+  const fPoleMat = new THREE.MeshLambertMaterial({color:0x444444});
+  const fFlagMat = new THREE.MeshLambertMaterial({color:0xFF8800, side:THREE.DoubleSide});
+  for(let side = -1; side <= 1; side += 2){
+    const fx = side * spW * 0.35;
+    const poleGeo = new THREE.CylinderGeometry(0.03, 0.04, flagPoleH, 5);
+    const pole = new THREE.Mesh(poleGeo, fPoleMat);
+    pole.position.set(fx, spH + flagPoleH * 0.5, peakZ);
+    pole.castShadow = true;
+    mesh.add(pole);
+    const flagShape = new THREE.Shape();
+    flagShape.moveTo(0, 0);
+    flagShape.lineTo(side * 0.4, 0.1);
+    flagShape.lineTo(0, 0.25);
+    flagShape.lineTo(0, 0);
+    const flagGeo = new THREE.ShapeGeometry(flagShape);
+    const flag = new THREE.Mesh(flagGeo, fFlagMat);
+    flag.position.set(fx, spH + flagPoleH * 0.75, peakZ + 0.03);
+    mesh.add(flag);
+  }
+
+  return mesh;
+}
+
 // ============================================================
 // LEVEL DEFINITIONS
 // ============================================================
@@ -1753,6 +2016,17 @@ const BUILTIN_LEVELS = {
       // Tube next to rail garden 2
       {sx:-1, sz:350, ex:-1, ez:372, h:1.0, w:0.5},
     ],
+    rollers: [
+      // Natural rollers between features for flow
+      {x:0, z:115, w:12, len:10, h:1.2, rot:0},
+      {x:-5, z:270, w:8, len:8, h:1.0, rot:0.1},
+    ],
+    spines: [
+      // Spine jump in the middle section
+      {x:0, z:380, w:12, len:18, h:3, rot:0},
+    ],
+    wallrides: [],
+    stairs: [],
     trees: []
   },
   "Street Spot": {
@@ -1763,8 +2037,14 @@ const BUILTIN_LEVELS = {
     jumps: [
       {x:-6, z:55, w:5, len:8, h:1.2, rot:0.1},
       {x:6, z:110, w:5, len:8, h:1.4, rot:-0.1},
+      // Ramp up to stair set 1
+      {x:-8, z:138, w:6, len:8, h:1.8, rot:0},
       {x:0, z:200, w:7, len:10, h:1.8, rot:0},
+      // Ramp up to stair set 2
+      {x:8, z:287, w:7, len:9, h:2.0, rot:0},
       {x:0, z:350, w:8, len:12, h:2.2, rot:0},
+      // Ramp up to stair set 3
+      {x:0, z:434, w:8, len:10, h:2.5, rot:0},
       {x:-5, z:520, w:5, len:8, h:1.5, rot:0.08},
       {x:5, z:535, w:5, len:8, h:1.5, rot:-0.08},
     ],
@@ -1808,6 +2088,15 @@ const BUILTIN_LEVELS = {
       // Standalone tube
       {sx:0, sz:310, ex:0, ez:338, h:0.9, w:0.55, color:0xCCCCCC},
     ],
+    rollers: [],
+    spines: [],
+    stairs: [
+      // Stair set: urban feature (each with a ramp jump before it)
+      {x:-8, z:150, w:5, h:1.8, steps:6, len:8, rot:0},
+      {x:8, z:300, w:6, h:2.0, steps:7, len:10, rot:0},
+      {x:0, z:450, w:7, h:2.5, steps:8, len:12, rot:0},
+    ],
+    wallrides: [],
     trees: []
   },
   "Backcountry": {
@@ -1835,6 +2124,20 @@ const BUILTIN_LEVELS = {
       // Tube replacing a backcountry box
       {sx:3, sz:172, ex:9, ez:196, h:0.6, w:0.5},
     ],
+    rollers: [
+      // Natural rollers throughout the backcountry
+      {x:-4, z:95, w:8, len:8, h:1.0, rot:0.15},
+      {x:5, z:150, w:7, len:7, h:0.8, rot:-0.1},
+      {x:0, z:240, w:10, len:10, h:1.5, rot:0},
+      {x:-6, z:350, w:6, len:6, h:0.7, rot:0.2},
+      {x:3, z:440, w:8, len:9, h:1.2, rot:-0.05},
+    ],
+    spines: [
+      // Backcountry spine
+      {x:0, z:300, w:10, len:16, h:2.5, rot:0},
+    ],
+    wallrides: [],
+    stairs: [],
     trees: []
   },
   "Half Pipe": {
@@ -1869,6 +2172,10 @@ const BUILTIN_LEVELS = {
       {x:16, z:120, w:2, h:0.5, len:10, rot:0, color:0x0088FF},
       {x:16, z:280, w:2, h:0.6, len:12, rot:0, color:0xFF8800},
     ],
+    rollers: [],
+    spines: [],
+    wallrides: [],
+    stairs: [],
     trees: []
   }
 };
@@ -1921,13 +2228,19 @@ function loadLevel(name, data){
     railData: data.rails || [],
     boxData: data.boxes || [],
     tubeData: data.tubes || [],
+    stairData: data.stairs || [],
   };
   levelJumps = data.jumps || [];
+  levelRollers = data.rollers || [];
+  levelSpines = data.spines || [];
   createTerrainMesh();
   (data.jumps||[]).forEach(j => createJumpMesh(j));
   (data.rails||[]).forEach(r => createRailMesh(r));
   (data.tubes||[]).forEach(r => createTubeMesh(r));
   (data.boxes||[]).forEach(b => createBoxMesh(b));
+  (data.rollers||[]).forEach(r => createRollerMesh(r));
+  (data.spines||[]).forEach(sp => createSpineMesh(sp));
+  (data.stairs||[]).forEach(s => createStairsMesh(s));
   (data.trees||[]).forEach(t => createTreeMesh(t));
   // Create start/end gates
   if(data.startGate) createGateMesh(data.startGate, 'start');
@@ -2725,7 +3038,7 @@ function updatePhysics(dt){
   sk.pos.x = clamp(sk.pos.x, -TERRAIN_W/2+3, TERRAIN_W/2-3);
   if(sk.pos.z > TERRAIN_L - 5){
     sk.pos.z = TERRAIN_L - 5;
-    sk.vel.z *= -0.3;
+    sk.vel.z = Math.min(sk.vel.z, 0);
   }
   if(sk.pos.z < 2){
     sk.pos.z = 2;
@@ -3097,7 +3410,13 @@ function updateGround(dt){
       sk.jibTime = 0;
       sk.jibPoints = 0;
       const onRailInfo = getOnRailInfo(sk.pos.x, sk.pos.z);
-      sk.jibType = onRailInfo ? (onRailInfo.isTube ? 'Tube Slide' : 'Rail Slide') : 'Box Slide';
+      if(onRailInfo){
+        sk.jibType = onRailInfo.isTube ? 'Tube Slide' : 'Rail Slide';
+      } else if(isOnStairs(sk.pos.x, sk.pos.z)){
+        sk.jibType = 'Stair Ride';
+      } else {
+        sk.jibType = 'Box Slide';
+      }
     }
     sk.jibTime += dt;
     const jibPts = Math.floor(dt * 80);
