@@ -488,8 +488,9 @@ let custRenderer = null, custScene = null, custCamera = null, custSkier = null, 
 function initCustomizePreview(){
   const container = document.getElementById('customizePreview');
   if(custRenderer){
-    // Already initialized, just update
+    // Already initialized, just update and restart render loop
     updateCustSkier();
+    startCustLoop();
     return;
   }
   custScene = new THREE.Scene();
@@ -647,6 +648,7 @@ function initCustDrag(){
 }
 
 function startCustLoop(){
+  if(custAnimId) return; // already running
   function custAnimate(){
     custAnimId = requestAnimationFrame(custAnimate);
     if(!document.getElementById('customizeScreen').classList.contains('active')){
@@ -662,18 +664,22 @@ function startCustLoop(){
   custAnimate();
 }
 
+let custInputsBound = false;
 function setupCustomizeInputs(){
   const ids = ['cJacket','cPants','cHelmet','cGoggles','cGloves','cBoots','cSkis'];
   const keys = ['jacket','pants','helmet','goggles','gloves','boots','skis'];
   ids.forEach((id, i) => {
     const el = document.getElementById(id);
     el.value = skierCustom[keys[i]];
-    el.addEventListener('input', () => {
-      skierCustom[keys[i]] = el.value;
-      saveCustomization();
-      updateCustSkier();
-    });
+    if(!custInputsBound){
+      el.addEventListener('input', () => {
+        skierCustom[keys[i]] = el.value;
+        saveCustomization();
+        updateCustSkier();
+      });
+    }
   });
+  custInputsBound = true;
 }
 
 const ambientLight = new THREE.AmbientLight(0x667799, 0.35);
@@ -3570,16 +3576,33 @@ function updateGround(dt){
     sk.state = 'butter';
     sk.butterAmount = 0.5;
     sk.butterDir = keys['KeyW'] ? -1 : 1; // W=nose press, default=tail press
+    sk.butterTime = 0;
+    sk.butterPoints = 0;
+    sk.butterShown = false;
   }
   if(sk.state === 'butter'){
     if(!keys['KeyB']){
+      // Ending butter — award points and show popup
+      if(sk.butterPoints > 0){
+        const name = (sk.isSwitch ? 'Switch ' : '') + (sk.butterDir === -1 ? 'Nose Butter' : 'Tail Butter');
+        score += sk.butterPoints;
+        comboCount++;
+        comboMultiplier = 1 + comboCount * 0.3;
+        sk.comboTimeout = 2.0;
+        recentTricks.push({name, pts:sk.butterPoints, time:3.0});
+        showTrickPopup(name, sk.butterPoints);
+        playSound('score', 0.2);
+      }
       sk.state = 'skiing';
       sk.butterAmount = 0; sk.butterDir = 0;
+      sk.butterTime = 0; sk.butterPoints = 0;
     } else {
       sk.butterDir = keys['KeyW'] ? -1 : 1;
       sk.butterAmount = clamp(sk.butterAmount + dt, 0, 1);
-      // Very slippery - like sliding on a box, minimal friction
-      score += Math.floor(dt * 25);
+      sk.butterTime = (sk.butterTime || 0) + dt;
+      // Points accumulate over time: more points the longer you hold + speed bonus
+      const speedBonus = clamp(sk.speed / 10, 0.5, 3);
+      sk.butterPoints = (sk.butterPoints || 0) + Math.floor(dt * 40 * speedBonus);
     }
   }
 
