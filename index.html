@@ -1346,6 +1346,207 @@ function createTerrainMesh(){
 }
 
 // ============================================================
+// SKI TRACK SYSTEM — two thin trail lines following each ski
+// ============================================================
+const TRACK_WIDTH = 0.045;          // half-width of each ski track (total ~0.09m matching ski width)
+const TRACK_MAX_SEGS = 2000;        // max trail segments per ski
+const TRACK_Y_OFFSET = 0.015;       // slight lift above terrain to avoid z-fighting
+
+let trackMeshL = null, trackMeshR = null;
+let trackGeoL = null, trackGeoR = null;
+let trackPosL = [], trackPosR = [];  // arrays of {x,y,z} world positions
+let trackSegCountL = 0, trackSegCountR = 0;
+let lastTrackPosL = null, lastTrackPosR = null;
+const TRACK_MIN_DIST = 0.3;         // min distance between track points
+let wasOnGroundForTracks = false;    // track previous ground state
+// Store completed track segments as separate meshes
+let finishedTrackMeshes = [];
+let trackLandingGap = 0;             // distance remaining to skip after landing
+let trackLandingPos = null;          // position when landing started
+
+const trackMat = new THREE.MeshBasicMaterial({
+  color: 0x667788, transparent: true, opacity: 0.55,
+  depthWrite: false, side: THREE.DoubleSide
+});
+
+function createTrackGeo(){
+  const maxVerts = TRACK_MAX_SEGS * 2;
+  const posArr = new Float32Array(maxVerts * 3);
+  const idxCount = (TRACK_MAX_SEGS - 1) * 6;
+  const indices = new Uint32Array(idxCount);
+  for(let i = 0; i < TRACK_MAX_SEGS - 1; i++){
+    const v = i * 2;
+    const idx = i * 6;
+    indices[idx]   = v;
+    indices[idx+1] = v + 1;
+    indices[idx+2] = v + 2;
+    indices[idx+3] = v + 1;
+    indices[idx+4] = v + 3;
+    indices[idx+5] = v + 2;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+  geo.setIndex(new THREE.BufferAttribute(indices, 1));
+  geo.setDrawRange(0, 0);
+  return geo;
+}
+
+function initTrackMeshes(){
+  trackGeoL = createTrackGeo();
+  trackMeshL = new THREE.Mesh(trackGeoL, trackMat);
+  trackMeshL.frustumCulled = false;
+  trackMeshL.renderOrder = 1;
+  scene.add(trackMeshL);
+  trackGeoR = createTrackGeo();
+  trackMeshR = new THREE.Mesh(trackGeoR, trackMat);
+  trackMeshR.frustumCulled = false;
+  trackMeshR.renderOrder = 1;
+  scene.add(trackMeshR);
+}
+
+// Freeze current active tracks into finished meshes and start fresh ribbons
+function freezeActiveTracks(){
+  if(trackSegCountL > 1){
+    // Clone the used portion into a static mesh
+    const usedVerts = trackSegCountL * 2 * 3;
+    const srcPos = trackGeoL.attributes.position.array;
+    const newPos = new Float32Array(usedVerts);
+    for(let i = 0; i < usedVerts; i++) newPos[i] = srcPos[i];
+    const idxCount = (trackSegCountL - 1) * 6;
+    const newIdx = new Uint32Array(idxCount);
+    const srcIdx = trackGeoL.index.array;
+    for(let i = 0; i < idxCount; i++) newIdx[i] = srcIdx[i];
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(newPos, 3));
+    g.setIndex(new THREE.BufferAttribute(newIdx, 1));
+    const m = new THREE.Mesh(g, trackMat);
+    m.frustumCulled = false; m.renderOrder = 1;
+    scene.add(m);
+    finishedTrackMeshes.push(m);
+  }
+  if(trackSegCountR > 1){
+    const usedVerts = trackSegCountR * 2 * 3;
+    const srcPos = trackGeoR.attributes.position.array;
+    const newPos = new Float32Array(usedVerts);
+    for(let i = 0; i < usedVerts; i++) newPos[i] = srcPos[i];
+    const idxCount = (trackSegCountR - 1) * 6;
+    const newIdx = new Uint32Array(idxCount);
+    const srcIdx = trackGeoR.index.array;
+    for(let i = 0; i < idxCount; i++) newIdx[i] = srcIdx[i];
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(newPos, 3));
+    g.setIndex(new THREE.BufferAttribute(newIdx, 1));
+    const m = new THREE.Mesh(g, trackMat);
+    m.frustumCulled = false; m.renderOrder = 1;
+    scene.add(m);
+    finishedTrackMeshes.push(m);
+  }
+  // Reset active track buffers
+  trackSegCountL = 0; trackSegCountR = 0;
+  lastTrackPosL = null; lastTrackPosR = null;
+  // Zero out position arrays
+  if(trackGeoL){
+    trackGeoL.attributes.position.array.fill(0);
+    trackGeoL.attributes.position.needsUpdate = true;
+    trackGeoL.setDrawRange(0, 0);
+  }
+  if(trackGeoR){
+    trackGeoR.attributes.position.array.fill(0);
+    trackGeoR.attributes.position.needsUpdate = true;
+    trackGeoR.setDrawRange(0, 0);
+  }
+}
+
+function resetTracks(){
+  trackSegCountL = 0; trackSegCountR = 0;
+  lastTrackPosL = null; lastTrackPosR = null;
+  wasOnGroundForTracks = false;
+  if(trackGeoL){ trackGeoL.attributes.position.array.fill(0); trackGeoL.attributes.position.needsUpdate = true; trackGeoL.setDrawRange(0, 0); }
+  if(trackGeoR){ trackGeoR.attributes.position.array.fill(0); trackGeoR.attributes.position.needsUpdate = true; trackGeoR.setDrawRange(0, 0); }
+  finishedTrackMeshes.forEach(m => { scene.remove(m); m.geometry.dispose(); });
+  finishedTrackMeshes = [];
+}
+
+function addTrackPoint(geo, segCount, px, py, pz, rx, rz){
+  const pos = geo.attributes.position.array;
+  const i = segCount * 2 * 3;
+  // Left edge of ribbon
+  pos[i]   = px - rx * TRACK_WIDTH;
+  pos[i+1] = py + TRACK_Y_OFFSET;
+  pos[i+2] = pz - rz * TRACK_WIDTH;
+  // Right edge of ribbon
+  pos[i+3] = px + rx * TRACK_WIDTH;
+  pos[i+4] = py + TRACK_Y_OFFSET;
+  pos[i+5] = pz + rz * TRACK_WIDTH;
+  geo.attributes.position.needsUpdate = true;
+  const drawTris = Math.max(0, segCount) * 6;
+  geo.setDrawRange(0, drawTris);
+  return segCount + 1;
+}
+
+function updateSkiTracks(){
+  if(!terrainMesh) return;
+  if(!trackGeoL) initTrackMeshes();
+  
+  const onGround = (sk.state === 'skiing' || sk.state === 'butter') && sk.state !== 'crash';
+  
+  // Detect ground→air transition: freeze current tracks & capture air time
+  if(wasOnGroundForTracks && !onGround){
+    freezeActiveTracks();
+  }
+  // Detect air→ground transition: set landing gap proportional to air time
+  if(!wasOnGroundForTracks && onGround){
+    // Gap distance = airTime * 10 (scaled by speed for natural look)
+    trackLandingGap = sk.airTime * 10;
+    trackLandingPos = {x: sk.pos.x, z: sk.pos.z};
+  }
+  wasOnGroundForTracks = onGround;
+  
+  if(!onGround) return;
+  
+  // If still in landing gap, count down distance traveled and skip drawing
+  if(trackLandingGap > 0 && trackLandingPos){
+    const dist = Math.hypot(sk.pos.x - trackLandingPos.x, sk.pos.z - trackLandingPos.z);
+    if(dist < trackLandingGap) return;
+    // Gap finished — clear it and start fresh tracks
+    trackLandingGap = 0;
+    trackLandingPos = null;
+  }
+  
+  // Ski direction for ribbon perpendicular
+  const moveAngle = sk.isSwitch ? sk.facing + Math.PI : sk.facing;
+  const fwdX = Math.sin(moveAngle), fwdZ = Math.cos(moveAngle);
+  const rx = fwdZ, rz = -fwdX;
+
+  // Left ski
+  if(sk.skiL.contact && trackSegCountL < TRACK_MAX_SEGS - 2){
+    const lx = sk.skiL.pos.x, lz = sk.skiL.pos.z;
+    const ly = getEffectiveHeight(lx, lz);
+    if(!lastTrackPosL || Math.hypot(lx - lastTrackPosL.x, lz - lastTrackPosL.z) >= TRACK_MIN_DIST){
+      if(!lastTrackPosL){
+        // First point of a new segment
+        trackSegCountL = addTrackPoint(trackGeoL, trackSegCountL, lx, ly, lz, rx, rz);
+      }
+      trackSegCountL = addTrackPoint(trackGeoL, trackSegCountL, lx, ly, lz, rx, rz);
+      lastTrackPosL = {x:lx, z:lz};
+    }
+  }
+
+  // Right ski
+  if(sk.skiR.contact && trackSegCountR < TRACK_MAX_SEGS - 2){
+    const rx2 = sk.skiR.pos.x, rz2 = sk.skiR.pos.z;
+    const ry = getEffectiveHeight(rx2, rz2);
+    if(!lastTrackPosR || Math.hypot(rx2 - lastTrackPosR.x, rz2 - lastTrackPosR.z) >= TRACK_MIN_DIST){
+      if(!lastTrackPosR){
+        trackSegCountR = addTrackPoint(trackGeoR, trackSegCountR, rx2, ry, rz2, rx, rz);
+      }
+      trackSegCountR = addTrackPoint(trackGeoR, trackSegCountR, rx2, ry, rz2, rx, rz);
+      lastTrackPosR = {x:rx2, z:rz2};
+    }
+  }
+}
+
+// ============================================================
 // FEATURE CREATION (jumps, rails, boxes, trees)
 // ============================================================
 let featureMeshes = [];
@@ -1463,7 +1664,7 @@ function createJumpMesh(j){
   const jumpSnowTex = snowTexture.clone();
   jumpSnowTex.repeat.set(1, 2);
   jumpSnowTex.needsUpdate = true;
-  const mat = new THREE.MeshStandardMaterial({color:0xE8ECF4, map:jumpSnowTex, roughness:0.75, metalness:0.02});
+  const mat = new THREE.MeshStandardMaterial({color:0xD0D0E0, map:jumpSnowTex, roughness:0.78, metalness:0.02});
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.set(j.x, baseTerrainHeight(j.x,j.z)-0.05, j.z);
   mesh.rotation.y = j.rot||0;
@@ -1697,7 +1898,7 @@ function createBoxMesh(b){
 const treeTrunkMat = new THREE.MeshStandardMaterial({color:0x5C3A1E, roughness:0.9, metalness:0.0});
 const treeLeafMat = new THREE.MeshStandardMaterial({color:0x1E5A1A, roughness:0.75, metalness:0.0});
 const treeLeafDarkMat = new THREE.MeshStandardMaterial({color:0x164514, roughness:0.8, metalness:0.0});
-const treeSnowMat = new THREE.MeshStandardMaterial({color:0xE4E8F0, roughness:0.6, metalness:0.02});
+const treeSnowMat = new THREE.MeshStandardMaterial({color:0xD0D0E0, roughness:0.6, metalness:0.02});
 
 // --- PARK BENCH MESH ---
 function createBenchMesh(b){
@@ -1893,7 +2094,7 @@ function createRollerMesh(r){
   const rollerSnowTex = snowTexture.clone();
   rollerSnowTex.repeat.set(1, 1.5);
   rollerSnowTex.needsUpdate = true;
-  const mat = new THREE.MeshStandardMaterial({color:0xE4E8F0, map:rollerSnowTex, roughness:0.78, metalness:0.02});
+  const mat = new THREE.MeshStandardMaterial({color:0xD0D0E0, map:rollerSnowTex, roughness:0.78, metalness:0.02});
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.set(r.x, baseTerrainHeight(r.x, r.z) - 0.05, r.z);
   mesh.rotation.y = r.rot || 0;
@@ -1934,7 +2135,7 @@ function createSpineMesh(sp){
   const spineSnowTex = snowTexture.clone();
   spineSnowTex.repeat.set(1, 2.5);
   spineSnowTex.needsUpdate = true;
-  const mat = new THREE.MeshStandardMaterial({color:0xE4E8F0, map:spineSnowTex, roughness:0.75, metalness:0.02});
+  const mat = new THREE.MeshStandardMaterial({color:0xD0D0E0, map:spineSnowTex, roughness:0.78, metalness:0.02});
   const mesh = new THREE.Mesh(geo, mat);
   mesh.position.set(sp.x, baseTerrainHeight(sp.x, sp.z) - 0.05, sp.z);
   mesh.rotation.y = sp.rot || 0;
@@ -2224,6 +2425,7 @@ const BUILTIN_LEVELS = {
 
 function loadLevel(name, data){
   clearFeatures();
+  resetTracks();
   currentLevel = {name, ...data,
     railData: data.rails || [],
     boxData: data.boxes || [],
@@ -4920,6 +5122,7 @@ function gameLoop(timestamp){
 
   if(gameState === 'playing'){
     updatePhysics(dt);
+    updateSkiTracks();
     updateAnimationState(dt);
     updateSkierModel(dt);
     updateCamera(dt);
