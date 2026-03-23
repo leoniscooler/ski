@@ -275,8 +275,8 @@ const POP_MULTIPLIER = 5.5;
 // Air / tricks
 const SPIN_TORQUE = 22.0; // input torque
 const SPIN_MAX = 28.0;
-const FLIP_TORQUE = 20.0;
-const FLIP_MAX = 24.0;
+const FLIP_TORQUE = 40.0;
+const FLIP_MAX = 48.0;
 const AIR_DRAG = 0.997;
 const TUCK_INERTIA_MULT = 0.55; // tucking reduces moment of inertia → spins faster
 const EXTEND_INERTIA_MULT = 1.6; // extending slows rotation
@@ -1361,8 +1361,6 @@ const TRACK_MIN_DIST = 0.3;         // min distance between track points
 let wasOnGroundForTracks = false;    // track previous ground state
 // Store completed track segments as separate meshes
 let finishedTrackMeshes = [];
-let trackLandingGap = 0;             // distance remaining to skip after landing
-let trackLandingPos = null;          // position when landing started
 
 const trackMat = new THREE.MeshBasicMaterial({
   color: 0x667788, transparent: true, opacity: 0.55,
@@ -1488,60 +1486,58 @@ function updateSkiTracks(){
   if(!terrainMesh) return;
   if(!trackGeoL) initTrackMeshes();
   
-  const onGround = (sk.state === 'skiing' || sk.state === 'butter') && sk.state !== 'crash';
+  // Strict physical ground contact: skier feet must be within tolerance of terrain
+  const terrainH = getEffectiveHeight(sk.pos.x, sk.pos.z);
+  const feetY = sk.pos.y - SKIER_HEIGHT;
+  const touchingGround = (sk.state === 'skiing' || sk.state === 'butter') 
+                         && (feetY - terrainH) < 0.5
+                         && !isOnIcySurface(sk.pos.x, sk.pos.z);
   
-  // Detect ground→air transition: freeze current tracks & capture air time
-  if(wasOnGroundForTracks && !onGround){
+  // Detect ground→air transition: freeze current tracks
+  if(wasOnGroundForTracks && !touchingGround){
     freezeActiveTracks();
   }
-  // Detect air→ground transition: set landing gap proportional to air time
-  if(!wasOnGroundForTracks && onGround){
-    // Gap distance = airTime * 10 (scaled by speed for natural look)
-    trackLandingGap = sk.airTime * 10;
-    trackLandingPos = {x: sk.pos.x, z: sk.pos.z};
-  }
-  wasOnGroundForTracks = onGround;
+  wasOnGroundForTracks = touchingGround;
   
-  if(!onGround) return;
+  if(!touchingGround) return;
   
-  // If still in landing gap, count down distance traveled and skip drawing
-  if(trackLandingGap > 0 && trackLandingPos){
-    const dist = Math.hypot(sk.pos.x - trackLandingPos.x, sk.pos.z - trackLandingPos.z);
-    if(dist < trackLandingGap) return;
-    // Gap finished — clear it and start fresh tracks
-    trackLandingGap = 0;
-    trackLandingPos = null;
-  }
-  
-  // Ski direction for ribbon perpendicular
+  // Compute ski tail positions (behind the skier)
   const moveAngle = sk.isSwitch ? sk.facing + Math.PI : sk.facing;
   const fwdX = Math.sin(moveAngle), fwdZ = Math.cos(moveAngle);
+  // Perpendicular (right) for ribbon width
   const rx = fwdZ, rz = -fwdX;
+  // Ski separation and tail offset
+  const skiSep = 0.11;
+  // Tail = center - forward * SKI_HALF_LEN
+  const ltx = sk.pos.x + (-skiSep * rx - SKI_HALF_LEN * fwdX);  // left ski tail x  (corrected: -skiSep along right, -halfLen along fwd, but right = (fwdZ, 0, -fwdX))
+  const ltz = sk.pos.z + (-skiSep * (-fwdX) - SKI_HALF_LEN * fwdZ); // left ski tail z  
+  // Actually let's compute properly using vectors:
+  const lTailX = sk.pos.x - skiSep * fwdZ - SKI_HALF_LEN * fwdX;
+  const lTailZ = sk.pos.z + skiSep * fwdX - SKI_HALF_LEN * fwdZ;
+  const rTailX = sk.pos.x + skiSep * fwdZ - SKI_HALF_LEN * fwdX;
+  const rTailZ = sk.pos.z - skiSep * fwdX - SKI_HALF_LEN * fwdZ;
 
-  // Left ski
-  if(sk.skiL.contact && trackSegCountL < TRACK_MAX_SEGS - 2){
-    const lx = sk.skiL.pos.x, lz = sk.skiL.pos.z;
-    const ly = getEffectiveHeight(lx, lz);
-    if(!lastTrackPosL || Math.hypot(lx - lastTrackPosL.x, lz - lastTrackPosL.z) >= TRACK_MIN_DIST){
+  // Left ski tail
+  if(trackSegCountL < TRACK_MAX_SEGS - 2){
+    const ly = getEffectiveHeight(lTailX, lTailZ);
+    if(!lastTrackPosL || Math.hypot(lTailX - lastTrackPosL.x, lTailZ - lastTrackPosL.z) >= TRACK_MIN_DIST){
       if(!lastTrackPosL){
-        // First point of a new segment
-        trackSegCountL = addTrackPoint(trackGeoL, trackSegCountL, lx, ly, lz, rx, rz);
+        trackSegCountL = addTrackPoint(trackGeoL, trackSegCountL, lTailX, ly, lTailZ, rx, rz);
       }
-      trackSegCountL = addTrackPoint(trackGeoL, trackSegCountL, lx, ly, lz, rx, rz);
-      lastTrackPosL = {x:lx, z:lz};
+      trackSegCountL = addTrackPoint(trackGeoL, trackSegCountL, lTailX, ly, lTailZ, rx, rz);
+      lastTrackPosL = {x:lTailX, z:lTailZ};
     }
   }
 
-  // Right ski
-  if(sk.skiR.contact && trackSegCountR < TRACK_MAX_SEGS - 2){
-    const rx2 = sk.skiR.pos.x, rz2 = sk.skiR.pos.z;
-    const ry = getEffectiveHeight(rx2, rz2);
-    if(!lastTrackPosR || Math.hypot(rx2 - lastTrackPosR.x, rz2 - lastTrackPosR.z) >= TRACK_MIN_DIST){
+  // Right ski tail
+  if(trackSegCountR < TRACK_MAX_SEGS - 2){
+    const ry = getEffectiveHeight(rTailX, rTailZ);
+    if(!lastTrackPosR || Math.hypot(rTailX - lastTrackPosR.x, rTailZ - lastTrackPosR.z) >= TRACK_MIN_DIST){
       if(!lastTrackPosR){
-        trackSegCountR = addTrackPoint(trackGeoR, trackSegCountR, rx2, ry, rz2, rx, rz);
+        trackSegCountR = addTrackPoint(trackGeoR, trackSegCountR, rTailX, ry, rTailZ, rx, rz);
       }
-      trackSegCountR = addTrackPoint(trackGeoR, trackSegCountR, rx2, ry, rz2, rx, rz);
-      lastTrackPosR = {x:rx2, z:rz2};
+      trackSegCountR = addTrackPoint(trackGeoR, trackSegCountR, rTailX, ry, rTailZ, rx, rz);
+      lastTrackPosR = {x:rTailX, z:rTailZ};
     }
   }
 }
@@ -2460,32 +2456,61 @@ const skierParts = {};
 function createSkier(){
   const g = new THREE.Group();
 
-  // ---- MATERIALS ----
-  // Jacket: ski jacket with slight sheen
-  const jacketMat = new THREE.MeshStandardMaterial({color:skierCustom.jacket, roughness:0.55, metalness:0.05});
-  const jacketAccentMat = new THREE.MeshStandardMaterial({color:new THREE.Color(skierCustom.jacket).lerp(new THREE.Color(0xffffff),0.25), roughness:0.5, metalness:0.05});
-  const jacketZipMat = new THREE.MeshStandardMaterial({color:0x888888, roughness:0.3, metalness:0.6});
-  // Pants: dark ski pants
-  const pantsMat = new THREE.MeshStandardMaterial({color:skierCustom.pants, roughness:0.65, metalness:0.0});
-  const pantsSeamMat = new THREE.MeshStandardMaterial({color:new THREE.Color(skierCustom.pants).lerp(new THREE.Color(0xffffff),0.1), roughness:0.6, metalness:0.0});
-  // Skin
-  const skinMat = new THREE.MeshStandardMaterial({color:0xE8B89D, roughness:0.8, metalness:0.0});
-  // Helmet
-  const helmetMat = new THREE.MeshStandardMaterial({color:skierCustom.helmet, roughness:0.35, metalness:0.1});
-  const helmetVentMat = new THREE.MeshStandardMaterial({color:new THREE.Color(skierCustom.helmet).lerp(new THREE.Color(0x000000),0.3), roughness:0.5, metalness:0.15});
-  // Goggles
-  const gogFrameMat = new THREE.MeshStandardMaterial({color:0x222222, roughness:0.4, metalness:0.1});
-  const gogLensMat = new THREE.MeshStandardMaterial({color:skierCustom.goggles, roughness:0.15, metalness:0.4, transparent:true, opacity:0.85});
-  // Gloves
-  const gloveMat = new THREE.MeshStandardMaterial({color:skierCustom.gloves, roughness:0.7, metalness:0.0});
-  // Boots
-  const bootMat = new THREE.MeshStandardMaterial({color:skierCustom.boots, roughness:0.55, metalness:0.05});
-  const bootBuckleMat = new THREE.MeshStandardMaterial({color:0x666666, roughness:0.3, metalness:0.5});
-  // Skis
-  const skiTopMat = new THREE.MeshStandardMaterial({color:skierCustom.skis, roughness:0.4, metalness:0.15});
-  const skiBaseMat = new THREE.MeshStandardMaterial({color:0x111111, roughness:0.6, metalness:0.1});
-  const skiEdgeMat = new THREE.MeshStandardMaterial({color:0x888888, roughness:0.2, metalness:0.7});
-  const bindingMat = new THREE.MeshStandardMaterial({color:0x333333, roughness:0.5, metalness:0.3});
+  // ---- MATERIALS (enhanced with realistic fabric/equipment properties) ----
+  // Jacket: technical ski jacket with subtle sheen and fabric texture
+  const jacketMat = new THREE.MeshStandardMaterial({
+    color:skierCustom.jacket, roughness:0.45, metalness:0.08,
+    envMapIntensity:0.4
+  });
+  const jacketAccentMat = new THREE.MeshStandardMaterial({
+    color:new THREE.Color(skierCustom.jacket).lerp(new THREE.Color(0xffffff),0.2),
+    roughness:0.4, metalness:0.1
+  });
+  const jacketZipMat = new THREE.MeshStandardMaterial({color:0x999999, roughness:0.15, metalness:0.8});
+  // Pants: technical ski pants with matte finish
+  const pantsMat = new THREE.MeshStandardMaterial({
+    color:skierCustom.pants, roughness:0.55, metalness:0.02,
+    envMapIntensity:0.2
+  });
+  const pantsSeamMat = new THREE.MeshStandardMaterial({
+    color:new THREE.Color(skierCustom.pants).lerp(new THREE.Color(0xffffff),0.08),
+    roughness:0.5, metalness:0.02
+  });
+  // Skin: warm subsurface scatter look
+  const skinMat = new THREE.MeshStandardMaterial({color:0xE8B89D, roughness:0.75, metalness:0.0});
+  // Helmet: hard shell with gloss
+  const helmetMat = new THREE.MeshStandardMaterial({
+    color:skierCustom.helmet, roughness:0.2, metalness:0.15,
+    envMapIntensity:0.6
+  });
+  const helmetVentMat = new THREE.MeshStandardMaterial({
+    color:new THREE.Color(skierCustom.helmet).lerp(new THREE.Color(0x000000),0.3),
+    roughness:0.35, metalness:0.2
+  });
+  // Goggles: reflective lens
+  const gogFrameMat = new THREE.MeshStandardMaterial({color:0x1a1a1a, roughness:0.3, metalness:0.15});
+  const gogLensMat = new THREE.MeshStandardMaterial({
+    color:skierCustom.goggles, roughness:0.05, metalness:0.6,
+    transparent:true, opacity:0.8, envMapIntensity:1.0
+  });
+  // Gloves: textured grip material
+  const gloveMat = new THREE.MeshStandardMaterial({
+    color:skierCustom.gloves, roughness:0.65, metalness:0.02
+  });
+  // Boots: hard plastic shell with buckle shine
+  const bootMat = new THREE.MeshStandardMaterial({
+    color:skierCustom.boots, roughness:0.35, metalness:0.1,
+    envMapIntensity:0.4
+  });
+  const bootBuckleMat = new THREE.MeshStandardMaterial({color:0x777777, roughness:0.15, metalness:0.7});
+  // Skis: glossy top sheet with metallic edges
+  const skiTopMat = new THREE.MeshStandardMaterial({
+    color:skierCustom.skis, roughness:0.2, metalness:0.2,
+    envMapIntensity:0.5
+  });
+  const skiBaseMat = new THREE.MeshStandardMaterial({color:0x0a0a0a, roughness:0.5, metalness:0.15});
+  const skiEdgeMat = new THREE.MeshStandardMaterial({color:0x999999, roughness:0.1, metalness:0.85});
+  const bindingMat = new THREE.MeshStandardMaterial({color:0x2a2a2a, roughness:0.35, metalness:0.4});
 
   // ---- TORSO (jacket with details) ----
   const torso = new THREE.Group();
@@ -2968,6 +2993,20 @@ const sk = {
     prevVelX: 0,
     prevVelY: 0,
     prevVelZ: 0,
+    // Enhanced dynamics
+    hipTwist: 0,          // hip yaw rotation (legs steer, torso counters)
+    hipSway: 0,           // lateral hip shift in turns
+    speedTuck: 0,         // auto-crouch at speed
+    headAnticipation: 0,  // head leads into turns
+    landingImpact: 0,     // landing absorption intensity
+    landingImpactVel: 0,  // spring velocity for landing
+    polePlantL: 0,        // pole plant angle left
+    polePlantR: 0,        // pole plant angle right
+    legSteerL: 0,         // leg yaw in turns
+    legSteerR: 0,
+    breathCycle: 0,       // subtle breathing motion
+    weightShiftZ: 0,      // fore/aft weight shift
+    spineWave: 0,         // subtle spine flex
   },
 };
 
@@ -3004,6 +3043,11 @@ function resetAnimState(){
   a.skiRollL=0; a.skiRollR=0; a.skiPitchL=0; a.skiPitchR=0;
   a.headLook=0; a.impactAbsorb=0; a.angulationAmount=0;
   a.prevVelX=0; a.prevVelY=0; a.prevVelZ=0;
+  a.hipTwist=0; a.hipSway=0; a.speedTuck=0; a.headAnticipation=0;
+  a.landingImpact=0; a.landingImpactVel=0;
+  a.polePlantL=0; a.polePlantR=0;
+  a.legSteerL=0; a.legSteerR=0;
+  a.breathCycle=0; a.weightShiftZ=0; a.spineWave=0;
 }
 
 // ============================================================
@@ -3789,6 +3833,9 @@ function updateAir(dt){
       sk.legCompression = clamp(LEG_REST + impactVel * 0.04, LEG_MIN, LEG_MAX);
       sk.legVel = impactVel * 0.3;
       sk.anim.impactAbsorb = clamp(impactVel * 0.06, 0, 1);
+      // Trigger landing impact spring for enhanced body absorption
+      sk.anim.landingImpact = clamp(impactVel * 0.08, 0, 1);
+      sk.anim.landingImpactVel = impactVel * 0.3;
       sk.vel.y = 0;
 
       // Determine switch from spin: odd number of 180s = switch
@@ -4093,14 +4140,19 @@ function updateAnimationState(dt){
   if(sk.state === 'skiing' || sk.state === 'butter'){
     // ---- BASE LOCOMOTION & TERRAIN IK LAYER ----
     const compression = sk.legCompression;
+    const speedFactor = clamp(sk.speed / 25, 0, 1); // 0-1 based on speed
 
-    // Knee bend from spring-damper compression
-    const baseBend = 0.15 + compression * 0.55;
+    // Speed tuck: automatically crouch more at higher speeds
+    const speedTuckTarget = speedFactor * 0.25;
+    a.speedTuck = lerp(a.speedTuck, speedTuckTarget, 1-Math.exp(-3*dt));
+
+    // Knee bend from spring-damper compression + speed tuck + landing impact
+    const baseBend = 0.15 + compression * 0.55 + a.speedTuck + a.landingImpact * 0.3;
     // Outside leg longer in turns, inside shorter
     const turnSign = sk.steerInput;
     const turnMag = Math.abs(turnSign);
     const turnActive = sk.turnPhase;
-    const outsideBias = turnMag * turnActive * 0.15;
+    const outsideBias = turnMag * turnActive * 0.18;
     a.kneeBendL = lerp(a.kneeBendL, baseBend + (turnSign > 0 ? -outsideBias : outsideBias), 1-Math.exp(-8*dt));
     a.kneeBendR = lerp(a.kneeBendR, baseBend + (turnSign > 0 ? outsideBias : -outsideBias), 1-Math.exp(-8*dt));
 
@@ -4113,43 +4165,86 @@ function updateAnimationState(dt){
     a.skiRollL = lerp(a.skiRollL, edgeRoll + sk.slopeRoll * 0.5, 1-Math.exp(-10*dt));
     a.skiRollR = lerp(a.skiRollR, edgeRoll + sk.slopeRoll * 0.5, 1-Math.exp(-10*dt));
 
+    // ---- HIP DYNAMICS ----
+    // Hips rotate into the turn (legs steer), torso counters
+    const hipTwistTarget = turnSign * turnActive * 0.2 * (sk.carving ? 1.3 : 0.7);
+    a.hipTwist = lerp(a.hipTwist, hipTwistTarget, 1-Math.exp(-6*dt));
+
+    // Hip lateral sway: weight shifts to outside ski in turns
+    const hipSwayTarget = -turnSign * turnActive * 0.08 * speedFactor;
+    a.hipSway = lerp(a.hipSway, hipSwayTarget, 1-Math.exp(-5*dt));
+
+    // Leg steering: knees/feet rotate into the turn
+    const legSteerTarget = turnSign * turnActive * 0.12;
+    a.legSteerL = lerp(a.legSteerL, legSteerTarget, 1-Math.exp(-7*dt));
+    a.legSteerR = lerp(a.legSteerR, legSteerTarget, 1-Math.exp(-7*dt));
+
     // ---- BALANCE / ANGULATION LAYER (upper vs lower body) ----
-    // Torso: stays quieter, faces more downhill than legs
-    // In carving turns, torso counter-rotates and angulates
-    const counterTwist = -turnSign * turnActive * 0.18 * (sk.carving ? 1.5 : 0.6);
+    // Torso counter-rotates against hip twist
+    const counterTwist = -turnSign * turnActive * 0.22 * (sk.carving ? 1.5 : 0.6) - a.hipTwist * 0.5;
     a.torsoTwist = lerp(a.torsoTwist, counterTwist, 1-Math.exp(-5*dt));
 
     // Angulation: hips move inside turn, torso stays upright
-    const angulation = turnSign * turnActive * (sk.carving ? 0.25 : 0.1) * clamp(sk.speed * 0.05, 0, 1);
+    const angulation = turnSign * turnActive * (sk.carving ? 0.28 : 0.12) * speedFactor;
     a.angulationAmount = lerp(a.angulationAmount, angulation, 1-Math.exp(-6*dt));
 
     // Shoulder drop: inside shoulder drops slightly in turns
-    a.shoulderDrop = lerp(a.shoulderDrop, turnSign * turnActive * 0.08, 1-Math.exp(-5*dt));
+    a.shoulderDrop = lerp(a.shoulderDrop, turnSign * turnActive * 0.1, 1-Math.exp(-5*dt));
 
-    // Torso lean forward/back
-    let leanTarget = -0.08; // slight forward lean (ankles flexed, hips back)
+    // ---- HEAD ANTICIPATION ----
+    // Head leads: looks into the turn before body follows
+    const headAnticTarget = sk.steerInput * 0.2 + turnSign * turnActive * 0.08;
+    a.headAnticipation = lerp(a.headAnticipation, headAnticTarget, 1-Math.exp(-7*dt));
+    a.headLook = lerp(a.headLook, a.headAnticipation, 1-Math.exp(-5*dt));
+
+    // Torso lean forward/back + speed tuck
+    let leanTarget = -0.08 - a.speedTuck * 0.4; // more forward at speed
     if(sk.state === 'butter'){
-      leanTarget = sk.butterDir * 0.3; // nose or tail press lean
+      leanTarget = sk.butterDir * 0.3;
     }
     if(keys['KeyS']) leanTarget = 0.05; // braking sits back slightly
     a.torsoLean = lerp(a.torsoLean, leanTarget, 1-Math.exp(-6*dt));
 
-    // Hip offset: center of mass moves inside turn
-    const hipLat = -sk.steerInput * turnActive * 0.06 * clamp(sk.speed * 0.04, 0, 1);
+    // Fore/aft weight shift
+    const weightZTarget = keys['KeyS'] ? 0.04 : (keys['KeyW'] ? -0.03 : -a.speedTuck * 0.02);
+    a.weightShiftZ = lerp(a.weightShiftZ, weightZTarget, 1-Math.exp(-5*dt));
+
+    // Hip offset: center of mass moves inside turn + landing impact
+    const hipLat = -sk.steerInput * turnActive * 0.06 * speedFactor + a.hipSway;
     a.hipOffset.x = lerp(a.hipOffset.x, hipLat, 1-Math.exp(-5*dt));
-    a.hipOffset.y = lerp(a.hipOffset.y, -compression * 0.25, 1-Math.exp(-8*dt));
+    a.hipOffset.y = lerp(a.hipOffset.y, -compression * 0.25 - a.landingImpact * 0.15, 1-Math.exp(-8*dt));
+
+    // ---- POLE PLANT MOTION ----
+    // Inside arm plants pole in carving turns
+    const polePlantIntensity = turnActive * turnMag * (sk.carving ? 0.6 : 0.2) * speedFactor;
+    if(turnSign > 0){
+      a.polePlantL = lerp(a.polePlantL, polePlantIntensity, 1-Math.exp(-8*dt));
+      a.polePlantR = lerp(a.polePlantR, 0, 1-Math.exp(-5*dt));
+    } else if(turnSign < 0){
+      a.polePlantR = lerp(a.polePlantR, polePlantIntensity, 1-Math.exp(-8*dt));
+      a.polePlantL = lerp(a.polePlantL, 0, 1-Math.exp(-5*dt));
+    } else {
+      a.polePlantL = lerp(a.polePlantL, 0, 1-Math.exp(-5*dt));
+      a.polePlantR = lerp(a.polePlantR, 0, 1-Math.exp(-5*dt));
+    }
 
     // Arms: stay forward and slightly spread, widen in balance situations
-    const armSpread = 0.05 + turnMag * 0.08 + sk.skidAmount * 0.06;
-    a.armSpreadL = lerp(a.armSpreadL, armSpread, 1-Math.exp(-6*dt));
-    a.armSpreadR = lerp(a.armSpreadR, armSpread, 1-Math.exp(-6*dt));
-    a.armForwardL = lerp(a.armForwardL, -0.15 - compression * 0.1, 1-Math.exp(-6*dt));
-    a.armForwardR = lerp(a.armForwardR, -0.15 - compression * 0.1, 1-Math.exp(-6*dt));
+    const armSpread = 0.05 + turnMag * 0.1 + sk.skidAmount * 0.08 + a.speedTuck * 0.03;
+    a.armSpreadL = lerp(a.armSpreadL, armSpread + a.polePlantL * 0.06, 1-Math.exp(-6*dt));
+    a.armSpreadR = lerp(a.armSpreadR, armSpread + a.polePlantR * 0.06, 1-Math.exp(-6*dt));
+    a.armForwardL = lerp(a.armForwardL, -0.15 - compression * 0.1 - a.polePlantL * 0.25 - a.speedTuck * 0.15, 1-Math.exp(-6*dt));
+    a.armForwardR = lerp(a.armForwardR, -0.15 - compression * 0.1 - a.polePlantR * 0.25 - a.speedTuck * 0.15, 1-Math.exp(-6*dt));
 
-    // Head: looks where going
-    a.headLook = lerp(a.headLook, sk.steerInput * 0.12, 1-Math.exp(-4*dt));
+    // ---- BREATHING / SUBTLE MOTION ----
+    a.breathCycle += dt * 1.8;
+    const breathAmt = Math.sin(a.breathCycle) * 0.003;
+    a.spineWave = lerp(a.spineWave, breathAmt + turnSign * turnActive * 0.015, 1-Math.exp(-4*dt));
 
-    // Landing impact absorption decay
+    // ---- LANDING IMPACT spring-damper ----
+    const impactSpring = 35, impactDamp = 8;
+    a.landingImpactVel += (-impactSpring * a.landingImpact - impactDamp * a.landingImpactVel) * dt;
+    a.landingImpact += a.landingImpactVel * dt;
+    a.landingImpact = clamp(a.landingImpact, 0, 1);
     a.impactAbsorb = lerp(a.impactAbsorb, 0, 1-Math.exp(-4*dt));
 
   } else if(sk.state === 'air'){
@@ -4308,7 +4403,7 @@ function updateSkierModel(dt){
   }
 
   // ---- LOWER BODY: legs, boots, skis (proper knee joint bending) ----
-  const compressionY = sk.legCompression * 0.25 + a.impactAbsorb * 0.15;
+  const compressionY = sk.legCompression * 0.25 + a.impactAbsorb * 0.15 + a.landingImpact * 0.1;
   const THIGH_LEN = 0.26; // thigh chain length (hip pivot to knee pivot)
   const SHIN_LEN = 0.24;  // shin chain length (knee pivot to ankle)
   const HIP_PIVOT_Y = 0.23; // thighGroup offset within leg group
@@ -4330,8 +4425,8 @@ function updateSkierModel(dt){
   // Left leg
   const lKnee = a.kneeBendL;
   const lFK = computeLegFK(lKnee);
-  skierParts.lLeg.position.set(-0.11 + a.hipOffset.x, 0.34 - compressionY, 0);
-  skierParts.lLeg.rotation.set(0, 0, 0);
+  skierParts.lLeg.position.set(-0.11 + a.hipOffset.x + a.hipSway * 0.3, 0.34 - compressionY, a.weightShiftZ);
+  skierParts.lLeg.rotation.set(0, a.hipTwist + a.legSteerL, 0);
   if(skierParts.lThigh){
     skierParts.lThigh.rotation.x = lFK.hipFlex;
     skierParts.lShin.rotation.x = lFK.kneeFlex;
@@ -4349,8 +4444,8 @@ function updateSkierModel(dt){
   // Right leg
   const rKnee = a.kneeBendR;
   const rFK = computeLegFK(rKnee);
-  skierParts.rLeg.position.set(0.11 + a.hipOffset.x, 0.34 - compressionY, 0);
-  skierParts.rLeg.rotation.set(0, 0, 0);
+  skierParts.rLeg.position.set(0.11 + a.hipOffset.x + a.hipSway * 0.3, 0.34 - compressionY, a.weightShiftZ);
+  skierParts.rLeg.rotation.set(0, a.hipTwist + a.legSteerR, 0);
   if(skierParts.rThigh){
     skierParts.rThigh.rotation.x = rFK.hipFlex;
     skierParts.rShin.rotation.x = rFK.kneeFlex;
@@ -4367,9 +4462,9 @@ function updateSkierModel(dt){
   // ---- UPPER BODY: torso, head (stays quieter than lower body) ----
   // Torso gets hip offset + angulation + counter-twist
   skierParts.torso.position.set(
-    a.hipOffset.x + a.angulationAmount * 0.15,
-    0.88 + a.hipOffset.y,
-    0
+    a.hipOffset.x + a.angulationAmount * 0.15 + a.hipSway * 0.15,
+    0.88 + a.hipOffset.y + a.spineWave,
+    a.weightShiftZ * 0.5
   );
   skierParts.torso.rotation.set(
     a.torsoLean,
@@ -4377,14 +4472,14 @@ function updateSkierModel(dt){
     a.angulationAmount + a.shoulderDrop
   );
 
-  // Head/helmet/goggles follow torso but with head look
-  const headY = 1.28 + a.hipOffset.y;
-  skierParts.head.position.set(a.hipOffset.x * 0.5, headY, 0);
-  skierParts.head.rotation.y = a.headLook;
-  skierParts.helmet.position.set(a.hipOffset.x * 0.5, headY + 0.05, 0);
-  skierParts.helmet.rotation.y = a.headLook;
-  skierParts.goggles.position.set(a.hipOffset.x * 0.3, headY, 0.12);
-  skierParts.goggles.rotation.y = a.headLook;
+  // Head/helmet/goggles follow torso but with head look + anticipation
+  const headY = 1.28 + a.hipOffset.y + a.spineWave * 1.5;
+  skierParts.head.position.set(a.hipOffset.x * 0.5 + a.hipSway * 0.08, headY, a.weightShiftZ * 0.3);
+  skierParts.head.rotation.set(a.torsoLean * 0.3, a.headLook, a.shoulderDrop * 0.4);
+  skierParts.helmet.position.set(a.hipOffset.x * 0.5 + a.hipSway * 0.08, headY + 0.05, a.weightShiftZ * 0.3);
+  skierParts.helmet.rotation.set(a.torsoLean * 0.3, a.headLook, a.shoulderDrop * 0.4);
+  skierParts.goggles.position.set(a.hipOffset.x * 0.3 + a.hipSway * 0.06, headY, 0.12 + a.weightShiftZ * 0.2);
+  skierParts.goggles.rotation.set(a.torsoLean * 0.3, a.headLook, a.shoulderDrop * 0.3);
 
   // ---- ARMS LAYER (connected to torso at shoulders, with physics swing) ----
   // Shoulder attachment points follow torso position
@@ -4404,12 +4499,12 @@ function updateSkierModel(dt){
     const lPendX = a.armPendulumL; // forward/back swing from physics
     skierParts.lArm.position.set(
       lShoulderX - a.armSpreadL * 0.6,
-      lShoulderY - 0.18,
-      0.04
+      lShoulderY - 0.18 - a.polePlantL * 0.06,
+      0.04 + a.weightShiftZ * 0.3
     );
     skierParts.lArm.rotation.set(
-      a.armForwardL + lPendX,
-      lSwingZ * 0.3,
+      a.armForwardL + lPendX - a.polePlantL * 0.4,
+      lSwingZ * 0.3 + a.polePlantL * 0.15,
       -a.armSpreadL * 0.5 + lSwingZ
     );
 
@@ -4420,12 +4515,12 @@ function updateSkierModel(dt){
     const rPendX = a.armPendulumR;
     skierParts.rArm.position.set(
       rShoulderX + a.armSpreadR * 0.6,
-      rShoulderY - 0.18,
-      0.04
+      rShoulderY - 0.18 - a.polePlantR * 0.06,
+      0.04 + a.weightShiftZ * 0.3
     );
     skierParts.rArm.rotation.set(
-      a.armForwardR + rPendX,
-      -rSwingZ * 0.3,
+      a.armForwardR + rPendX - a.polePlantR * 0.4,
+      -rSwingZ * 0.3 - a.polePlantR * 0.15,
       a.armSpreadR * 0.5 + rSwingZ
     );
   }
